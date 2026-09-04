@@ -1,0 +1,40 @@
+name: 海南天气预警监控
+
+on:
+  schedule:
+    # 北京时间 09:00 首检（UTC 01:00）
+    - cron: "0 1 * * *"
+    # 每 10 分钟轮询一次（UTC 每 10 分钟），对应北京时间每 10 分钟
+    - cron: "*/10 * * * *"
+  workflow_dispatch: {}  # 允许手动触发测试
+
+permissions:
+  contents: write  # 允许提交 state.json 回仓库
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+
+      - name: 设置 Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 运行监控脚本
+        env:
+          WECOM_WEBHOOK: ${{ secrets.WECOM_WEBHOOK }}
+          MODE: auto
+        run: python weather_monitor.py
+
+      - name: 提交状态文件（持久化预警等级）
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if [ -f state.json ]; then
+            git add state.json
+            git commit -m "chore: update monitor state $(date -u +%Y%m%d%H%M)" || echo "无变化"
+            git push || echo "推送失败（可能无变化）"
+          fi
