@@ -1,0 +1,28 @@
+name: 海南台风预警监控
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"   # 每 10 分钟轮询（注意：私有库按 2000 分钟/月计费，10 分钟可能超额，见下方说明）
+    - cron: "0 1 * * *"      # 每天 09:00 北京时间 每日报告（UTC 01:00）
+  workflow_dispatch:         # 支持手动触发
+
+permissions:
+  contents: write            # 用于把 state.json 提交回仓库（持久化去重）
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      # 网络层使用标准库 urllib，无需 pip 安装任何依赖，运行更快更稳
+      - name: 运行监控
+        env:
+          WECHAT_WEBHOOK: ${{ secrets.WECHAT_WEBHOOK }}
+        run: |
+          if [ "${{ github.event.schedule }}" = "0 1 * * *" ]; then
+            python3 monitor.py --mode daily
+          else
+            python3 monitor.py --mode poll
+          fi
