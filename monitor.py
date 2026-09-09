@@ -98,7 +98,7 @@ def http_post_json(url, payload, timeout=10):
         return resp.read().decode("utf-8")
 
 
-def fetch(adcode, tries=3):
+def fetch(adcode, tries=4):
     """拉取某 adcode 的预警；失败返回 None（与空列表区分）。"""
     url = f"{API}?adcode={adcode}"
     for i in range(tries):
@@ -108,7 +108,7 @@ def fetch(adcode, tries=3):
             return d.get("data") or []
         except Exception as e:
             log(f"fetch error {adcode}: {e}")
-        time.sleep(2 * (i + 1))
+        time.sleep(2 ** (i + 1))  # 2,4,8,16s 指数退避，更耐偶发抖动
     return None
 
 
@@ -291,7 +291,8 @@ def mode_poll():
     state = load_state()
     active_ids = {a["id"] for a in active}
     removed_ids = set(state.keys()) - active_ids - {"last_daily_report_date",
-                                                    "last_error_alert", "had_errors"}
+                                                    "last_error_alert", "had_errors",
+                                                    "fail_streak"}
 
     pushed = 0
     changed = False
@@ -361,19 +362,26 @@ def mode_poll():
         state.pop(rid, None)
         changed = True
 
-    # 抓取异常自告警（避免静默失效）
-    if errors:
+    # 抓取异常自告警（容忍偶发失败，避免凌晨维护窗口/境外链路抖动误报）
+    FAIL_TOLERANCE = 3  # 连续 3 轮（约 30 分钟）失败才告警，偶发抖动不触发
+    fs = state.get("fail_streak", 0) or 0
+    fs = fs + 1 if errors else 0
+    if fs != (state.get("fail_streak", 0) or 0):
+        state["fail_streak"] = fs
+        changed = True
+    real_failure = fs >= FAIL_TOLERANCE
+    if real_failure:
         last_err = state.get("last_error_alert", 0.0) or 0.0
         if now - last_err >= ERROR_ALERT_INTERVAL:
             wechat_markdown("> **监控异常提醒**\n"
-                            "> 气象预警数据获取失败，请检查接口或网络连通性。\n"
-                            "> 错误：" + "；".join(errors))
+                            "> 气象预警数据连续获取失败，请检查接口或网络连通性。\n"
+                            "> 错误：" + "；".join(errors) + f"\n> 已连续失败 {fs} 轮")
             state["last_error_alert"] = now
             changed = True
-    if (not errors) and state.get("had_errors"):
+    if (not real_failure) and state.get("had_errors"):
         wechat_markdown("> **监控恢复正常**\n> 气象预警数据已可正常获取。")
         changed = True
-    state["had_errors"] = bool(errors)
+    state["had_errors"] = bool(real_failure)
 
     if changed:
         save_state(state)
