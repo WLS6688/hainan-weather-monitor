@@ -2,5 +2,8 @@
   "last_error_alert": 1788890811.488256,
   "had_errors": false,
   "last_daily_report_date": "2026-09-11",
-  "fail_streak": 0
+  "fail_streak": 1,
+  "imminent_alerted": {},
+  "disturbance_alerted": {},
+  "_dist_last_check": 1789150100.802249
 }
