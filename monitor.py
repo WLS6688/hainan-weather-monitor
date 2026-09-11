@@ -566,6 +566,106 @@ def impact_assessment(det, box_fc, in_hainan):
             "澄迈需关注防风、防涝及海上作业安全。")
 
 
+# ---- 热带扰动物理监测（Open-Meteo 风速+气压代理，不依赖编号）----
+# 解决盲区：nmc 仅收录已编号台风，未编号热带扰动（南海土台风前身）无路径数据；
+# 用近海风速+海平面气压作代理，气压偏低(热带低压特征)可过滤多数冷空气大风误报。
+SEA_POINTS = [
+    ("澄迈近海", 19.6, 110.6),
+    ("海南东北部近海", 19.5, 111.0),
+    ("海南东南部近海", 18.6, 111.0),
+    ("海南南部近海", 18.3, 109.6),
+    ("三亚近海", 17.8, 109.5),
+    ("海南西部近海", 19.3, 108.7),
+]
+DIST_WIND_MS = 10.8     # 持续风 ≥6级
+DIST_PRES = 1003.0      # 且海平面气压 ≤1003 hPa（热带系统低压特征）
+DIST_GUST_MS = 17.2     # 或阵风 ≥8级
+DIST_GUST_PRES = 1005.0
+
+
+def fetch_sea_wind(lat, lon, tries=2):
+    """Open-Meteo 拉取近海未来48h 风速/阵风/海平面气压(m/s,hPa)。失败返回 None。"""
+    url = ("https://api.open-meteo.com/v1/forecast"
+           f"?latitude={lat}&longitude={lon}"
+           "&hourly=wind_speed_10m,wind_gusts_10m,surface_pressure"
+           "&wind_speed_unit=ms&forecast_days=2&timezone=Asia%2FShanghai")
+    for i in range(tries):
+        try:
+            raw = http_get(url, {"User-Agent": "Mozilla/5.0"}, timeout=15)
+            d = json.loads(raw)
+            h = d.get("hourly") or {}
+            return {"ws": h.get("wind_speed_10m") or [],
+                    "gust": h.get("wind_gusts_10m") or [],
+                    "pres": h.get("surface_pressure") or []}
+        except Exception as e:
+            log("sea_wind error:", e)
+        time.sleep(2 * (i + 1))
+    return None
+
+
+def disturbance_signal():
+    """扫描海南近海监测点，若检出热带系统大风信号则返回最强点 dict，否则 None。"""
+    best = None
+    for name, lat, lon in SEA_POINTS:
+        d = fetch_sea_wind(lat, lon)
+        if not d or not d["pres"]:
+            continue
+        for ws, g, p in zip(d["ws"], d["gust"], d["pres"]):
+            if ws is None or p is None:
+                continue
+            hit = (ws >= DIST_WIND_MS and p <= DIST_PRES) or \
+                  (g and g >= DIST_GUST_MS and p <= DIST_GUST_PRES)
+            if hit and (best is None or p < best["pressure"]):
+                best = {"region": name, "wind_ms": ws,
+                        "gust_ms": g or ws, "pressure": p}
+    return best
+
+
+def fmt_disturbance(sig):
+    return ("> **【热带系统大风监测 · 非官方预警】**\n"
+            f"> 监测到{sig['region']}未来48h持续风可达 {wind_desc(sig['wind_ms'])}、"
+            f"阵风 {wind_desc(sig['gust_ms'])}，\n"
+            f"> 海平面气压偏低（约 {sig['pressure']:.0f} hPa），可能为热带扰动影响。\n"
+            f"> 此为气象数据代理提示（非气象台正式预警），请以官方台风预警信号为准。")
+
+
+def disturbance_outlook():
+    """每日报告用的物理监测补充段（非官方）。"""
+    sig = disturbance_signal()
+    if not sig:
+        return []
+    return ["> —— 热带扰动监测（非官方） ——", fmt_disturbance(sig)]
+
+
+def check_disturbance(state):
+    """实时轮询中的物理监测补充：检出信号且达推送条件 -> 实时提示（每天≤1次，升级再提示）。"""
+    rec = state.setdefault("disturbance_alerted", {})
+    now = time.time()
+    if now - (state.get("_dist_last_check", 0.0) or 0.0) < 1800:
+        return False   # 每30分钟才查一次 Open-Meteo，降低调用量
+    state["_dist_last_check"] = now
+    sig = disturbance_signal()
+    today = datetime.now(BEIJING).strftime("%Y-%m-%d")
+    if not sig:
+        if rec.get("active"):
+            rec["active"] = False
+            rec.pop("pressure", None)
+            rec.pop("date", None)
+            return True
+        return False
+    first_today = rec.get("date") != today
+    stronger = (rec.get("pressure") is None) or (sig["pressure"] <= rec["pressure"] - 5)
+    if first_today or stronger:
+        wechat_markdown(fmt_disturbance(sig))
+        rec["date"] = today
+        rec["active"] = True
+        rec["pressure"] = sig["pressure"]
+        rec["region"] = sig["region"]
+        log("[扰动监测] 实时提示:", sig["region"], sig["pressure"])
+        return True
+    return False
+
+
 def parse_nmc_time(s):
     """'YYYYMMDDHHMM' -> 北京时 epoch；失败返回 None。"""
     if len(s) != 12:
@@ -644,7 +744,7 @@ def typhoon_outlook():
 
 
 def check_imminent(state):
-    """临门一脚：预报显示 <48h 内进入海南影响框 -> 实时推一条逼近预警（每台风仅一次）。"""
+    """台风趋向/逼近实时预警：预报路径进入海南影响框即实时推一条（每台风仅一次，不刷屏）。"""
     changed = False
     alerted = state.setdefault("imminent_alerted", {})
     now = time.time()
@@ -670,34 +770,45 @@ def check_imminent(state):
         if eta_epoch is None:
             continue
         remain = eta_epoch - now
-        if 0 <= remain <= 48 * 3600:
-            key = str(t["id"])
-            if key not in alerted:
-                cur = det["cur"]
-                scn = STRENGTH_CN.get(cur["strength"], cur["strength"] or "未知")
+        key = str(t["id"])
+        if key not in alerted:
+            cur = det["cur"]
+            scn = STRENGTH_CN.get(cur["strength"], cur["strength"] or "未知")
+            pres = f"，中心气压 {cur['pressure']} hPa" if cur.get("pressure") else ""
+            win = fmt_window(box_fc)
+            radius7 = f"，七级风圈半径约 {cur['radius7']} km" if cur.get("radius7") else ""
+            trend = det.get("trend", "强度平稳")
+            in_hainan_im = in_box(cur["lat"], cur["lon"])
+            imp = impact_assessment(det, box_fc, in_hainan_im)
+            # 标题随剩余时间分级：已进入 / 逼近(<48h) / 趋向(>48h)
+            if remain < 0:
+                title = "【台风已进入海南影响范围】"
+                sub = "当前预报路径已进入海南影响范围，请立即关注官方台风预警信号。"
+            elif remain <= 48 * 3600:
                 hours = int(remain // 3600)
-                pres = f"，中心气压 {cur['pressure']} hPa" if cur.get("pressure") else ""
-                win = fmt_window(box_fc)
-                radius7 = f"，七级风圈半径约 {cur['radius7']} km" if cur.get("radius7") else ""
-                trend = det.get("trend", "强度平稳")
-                in_hainan_im = in_box(cur["lat"], cur["lon"])
-                imp = impact_assessment(det, box_fc, in_hainan_im)
-                msg = (f"> **【台风逼近预警】剩余约 {hours} 小时**\n"
-                       f"> 台风 {t['cn']}（编号{t['num']}）预报路径预计 {fmt_dt(eta['time'])} "
-                       f"前后进入海南影响范围。\n"
-                       f"> 当前：{cur['lat']:.1f}°N, {cur['lon']:.1f}°E，强度 {scn}{pres}\n"
-                       f"> 趋势：{trend}{radius7}\n"
-                       f"> 影响时段：{win}\n")
-                if imp:
-                    msg += f"{imp}\n"
-                msg += (f"> 防御指引：{LEVEL_ADVICE.get('红色', '')}\n"
-                        f"> 请提前做好防风准备，并密切关注官方台风预警信号。\n"
-                        f"> 实时台风路径：{TYPHOON_TRACK_URL}\n"
-                        f"> 数据来源：中国气象局·中央气象台")
-                wechat_markdown(msg)
-                alerted[key] = {"cn": t["cn"], "num": t["num"], "eta": eta["time"]}
-                changed = True
-                log("[逼近] 实时推送:", t["cn"], "剩余约", hours, "小时")
+                title = f"【台风逼近预警】剩余约 {hours} 小时"
+                sub = (f"台风 {t['cn']}（编号{t['num']}）预报路径预计 {fmt_dt(eta['time'])} "
+                       f"前后进入海南影响范围。")
+            else:
+                hours = int(remain // 3600)
+                title = f"【台风趋向海南影响区】预计约 {hours} 小时后进入"
+                sub = (f"台风 {t['cn']}（编号{t['num']}）预报路径预计 {fmt_dt(eta['time'])} "
+                       f"前后进入海南影响范围。")
+            msg = (f"> **{title}**\n"
+                   f"> {sub}\n"
+                   f"> 当前：{cur['lat']:.1f}°N, {cur['lon']:.1f}°E，强度 {scn}{pres}\n"
+                   f"> 趋势：{trend}{radius7}\n"
+                   f"> 影响时段：{win}\n")
+            if imp:
+                msg += f"{imp}\n"
+            msg += (f"> 防御指引：{LEVEL_ADVICE.get('红色', '')}\n"
+                    f"> 请提前做好防风准备，并密切关注官方台风预警信号。\n"
+                    f"> 实时台风路径：{TYPHOON_TRACK_URL}\n"
+                    f"> 数据来源：中国气象局·中央气象台")
+            wechat_markdown(msg)
+            alerted[key] = {"cn": t["cn"], "num": t["num"], "eta": eta["time"]}
+            changed = True
+            log("[趋向/逼近] 实时推送:", t["cn"], "剩余约", int(remain // 3600), "小时")
     return changed
 
 
@@ -708,7 +819,8 @@ def mode_poll():
     active_ids = {a["id"] for a in active}
     removed_ids = set(state.keys()) - active_ids - {"last_daily_report_date",
                                                     "last_error_alert", "had_errors",
-                                                    "fail_streak", "imminent_alerted"}
+                                                    "fail_streak", "imminent_alerted",
+                                                    "disturbance_alerted", "_dist_last_check"}
 
     pushed = 0
     changed = False
@@ -778,8 +890,11 @@ def mode_poll():
         state.pop(rid, None)
         changed = True
 
-    # 台风逼近实时预警（临门一脚：<48h 进入海南框，每台风仅一次）
+    # 台风趋向/逼近实时预警（预报路径进入海南框即实时推，每台风仅一次）
     if check_imminent(state):
+        changed = True
+    # 热带扰动物理监测实时补充（非官方，每天≤1次）
+    if check_disturbance(state):
         changed = True
 
     # 抓取异常自告警（容忍偶发失败，避免凌晨维护窗口/境外链路抖动误报）
@@ -840,6 +955,10 @@ def mode_daily():
     if outlook:
         lines.append("> —— 台风趋势提示 ——")
         lines.extend(outlook)
+    # 热带扰动监测（非官方；基于 Open-Meteo 近海风速+气压代理，覆盖未编号扰动）
+    dist = disturbance_outlook()
+    if dist:
+        lines.extend(dist)
 
     if sea:
         lines.append("> 其他海上预警（不实时推送）：")
