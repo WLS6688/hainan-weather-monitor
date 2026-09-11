@@ -30,8 +30,8 @@
   * 轮询时间(10min) ≠ 推送时间(120min)，解耦避免刷屏
 
 实时逼近预警(临门一脚):
-  * 每 10 分钟轮询时额外检查 nmc 预报路径；若预报显示 <48 小时内进入海南影响框
-    -> 实时推送一条“台风逼近预警”（含剩余小时数 + 强度趋势 + 七级风圈 + 影响时段 + 防御指引），每台风仅推一次，避免刷屏
+    * 每 10 分钟轮询时额外检查 nmc 预报路径；若预报显示 <48 小时内进入海南影响框
+    -> 实时推送一条“台风逼近预警”（含剩余小时数 + 强度趋势 + 七级风圈 + 影响时段 + 影响预估 + 防御指引），每台风仅推一次，避免刷屏
   * 日常趋势提示仍在每日报告中给出，二者互补；无活跃威胁时不打扰
 
 每日报告(09:00) — 含台风趋势提示:
@@ -39,7 +39,7 @@
   * 【台风趋势提示】：拉取 nmc 活跃台风预报路径（参考日本气象厅 JMA：强度等级 + 七级风圈）
       - 任一预报路径点进入“海南影响框” -> 提示“预计X日前后台风可能逼近/登录海南”
       - 已进入框/当前逼近 -> 提示“当前已进入海南影响范围”
-      - 附：最新位置 / 强度 / 移动方向 / 强度趋势(加强中·减弱中·维持) / 七级风圈半径 / 预计影响时段 + 实时台风路径链接
+      - 附：最新位置 / 强度 / 移动方向 / 强度趋势(加强中·减弱中·维持) / 七级风圈半径 / 预计影响时段 / 影响预估(区域·风级·降水·风暴潮) + 实时台风路径链接
       - 无直接影响海南的台风 -> 提示“未来数日无预报路径直接影响海南的台风”
   * 附加【澄迈今日天气预报】（Open-Meteo 免 key）
   * 按日期去重：同一天无论触发几次，只推一次
@@ -497,6 +497,75 @@ def fmt_window(box_fc):
     return f"{precise}（北京时），约 {human}"
 
 
+def haversine(lat1, lon1, lat2, lon2):
+    """两点间大圆距离（km）。"""
+    from math import radians, sin, cos, asin, sqrt
+    R = 6371.0
+    dphi = radians(lat2 - lat1)
+    dl = radians(lon2 - lon1)
+    a = sin(dphi / 2) ** 2 + cos(radians(lat1)) * cos(radians(lat2)) * sin(dl / 2) ** 2
+    return R * 2 * asin(sqrt(a))
+
+
+def wind_desc(ms):
+    """风速(m/s) -> 阵风等级中文描述（参考蒲福风级）。"""
+    if ms is None:
+        return "风力不明"
+    if ms < 10.8:
+        return "6级以下"
+    if ms < 17.2:
+        return "6-7级"
+    if ms < 24.5:
+        return "8-9级"
+    if ms < 32.7:
+        return "10-11级"
+    if ms < 41.5:
+        return "12-13级"
+    if ms < 50.9:
+        return "14-15级"
+    return "16级或以上"
+
+
+def impact_assessment(det, box_fc, in_hainan):
+    """根据预报进入海南框的点，估算对海南/澄迈的影响（区域 + 风级 + 降水 + 风暴潮）。
+    返回完整 markdown 行（以 '> 　' 开头），无明确影响时返回 ''。参考香港天文台“影响”段落做法。"""
+    cur = det["cur"]
+    # 进入框的点中离澄迈最近者；若当前已在框内则一并纳入
+    cand = [(haversine(f["lat"], f["lon"], CHENGMAI_LAT, CHENGMAI_LON), f) for f in box_fc]
+    if in_hainan:
+        cand.append((haversine(cur["lat"], cur["lon"], CHENGMAI_LAT, CHENGMAI_LON), cur))
+    if not cand:
+        return ""
+    cand.sort(key=lambda x: x[0])
+    mind, near = cand[0]
+    wspd = near.get("wind") or cur.get("wind")
+    lvl = wind_desc(wspd)
+    # 区域 + 海南方位（南部/东部/西部/北部）判定
+    on_island = (18.0 <= near["lat"] <= 20.1 and 108.5 <= near["lon"] <= 111.1)
+    if on_island:
+        if near["lat"] < 19.2:
+            sub = "南部"
+        elif near["lat"] > 19.8:
+            sub = "北部"
+        else:
+            sub = "中部"
+        if near["lon"] < 109.8:
+            sub += "西部"
+        elif near["lon"] > 110.2:
+            sub += "东部"
+        area = f"海南岛{sub}（含澄迈一带）" if mind < 80 else f"海南岛{sub}（陆地）"
+    elif mind < 150:
+        area = "海南岛周边近海及沿海"
+    else:
+        area = "海南邻近海域"
+    rank = STRENGTH_RANK.get(near.get("strength") or cur.get("strength"), 0)
+    storm = "，并伴风暴潮风险" if rank >= 4 else ""
+    rain = "暴雨到大暴雨" if rank >= 3 else ("大雨" if rank >= 2 else "阵雨或雷阵雨")
+    return ("> 　影响预估：预计对" + area + "带来风雨影响，"
+            f"沿海及近海阵风可达 {lvl}，伴{rain}{storm}；"
+            "澄迈需关注防风、防涝及海上作业安全。")
+
+
 def parse_nmc_time(s):
     """'YYYYMMDDHHMM' -> 北京时 epoch；失败返回 None。"""
     if len(s) != 12:
@@ -564,6 +633,9 @@ def typhoon_outlook():
                 lines.append(f"> 　影响时段：{win}")
         else:
             lines.append("> 　状态：位于海南邻近海域，后续路径存在不确定性，建议持续关注。")
+        imp = impact_assessment(det, box_fc, in_hainan)
+        if (eta or in_hainan) and imp:
+            lines.append(imp)
         lines.append(f"> 　实时路径：{TYPHOON_TRACK_URL}")
     if not lines:
         # 有活跃台风但均不直接影响海南
@@ -608,16 +680,20 @@ def check_imminent(state):
                 win = fmt_window(box_fc)
                 radius7 = f"，七级风圈半径约 {cur['radius7']} km" if cur.get("radius7") else ""
                 trend = det.get("trend", "强度平稳")
+                in_hainan_im = in_box(cur["lat"], cur["lon"])
+                imp = impact_assessment(det, box_fc, in_hainan_im)
                 msg = (f"> **【台风逼近预警】剩余约 {hours} 小时**\n"
                        f"> 台风 {t['cn']}（编号{t['num']}）预报路径预计 {fmt_dt(eta['time'])} "
                        f"前后进入海南影响范围。\n"
                        f"> 当前：{cur['lat']:.1f}°N, {cur['lon']:.1f}°E，强度 {scn}{pres}\n"
                        f"> 趋势：{trend}{radius7}\n"
-                       f"> 影响时段：{win}\n"
-                       f"> 防御指引：{LEVEL_ADVICE.get('红色', '')}\n"
-                       f"> 请提前做好防风准备，并密切关注官方台风预警信号。\n"
-                       f"> 实时台风路径：{TYPHOON_TRACK_URL}\n"
-                       f"> 数据来源：中国气象局·中央气象台")
+                       f"> 影响时段：{win}\n")
+                if imp:
+                    msg += f"{imp}\n"
+                msg += (f"> 防御指引：{LEVEL_ADVICE.get('红色', '')}\n"
+                        f"> 请提前做好防风准备，并密切关注官方台风预警信号。\n"
+                        f"> 实时台风路径：{TYPHOON_TRACK_URL}\n"
+                        f"> 数据来源：中国气象局·中央气象台")
                 wechat_markdown(msg)
                 alerted[key] = {"cn": t["cn"], "num": t["num"], "eta": eta["time"]}
                 changed = True
