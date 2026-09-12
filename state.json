@@ -3,7 +3,13 @@
   "had_errors": false,
   "last_daily_report_date": "2026-09-11",
   "fail_streak": 0,
-  "imminent_alerted": {},
+  "imminent_alerted": {
+    "3332799": {
+      "cn": "热带低压",
+      "num": "20260027",
+      "eta": "202609120000"
+    }
+  },
   "disturbance_alerted": {},
-  "_dist_last_check": 1789150100.802249
+  "_dist_last_check": 1789173805.552847
 }
