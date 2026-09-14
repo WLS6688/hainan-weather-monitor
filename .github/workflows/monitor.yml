@@ -16,7 +16,11 @@ jobs:
     # 网络较慢时可能超时（超时会导致状态不落盘 -> 下轮重复推送），故放宽到 10 分钟
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      # v7：node24 运行时（消除 Node 20 弃用告警）
+      # persist-credentials 显式开启：commit_state() 依赖它用内置 GITHUB_TOKEN 把 state.json 推回仓库
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: true
 
       - name: 安装依赖
         run: python3 -m pip install --quiet matplotlib
