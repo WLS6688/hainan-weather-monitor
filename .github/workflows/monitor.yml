@@ -2,7 +2,7 @@ name: 海南台风预警监控
 
 on:
   schedule:
-    - cron: "*/10 * * * *"   # 每 10 分钟轮询（注意：私有库按 2000 分钟/月计费，10 分钟可能超额，见下方说明）
+    - cron: "*/10 * * * *"   # 每 10 分钟轮询（仓库已设为 Public，Actions 分钟数不限）
     - cron: "0 1 * * *"      # 每天 09:00 北京时间 每日报告（UTC 01:00）
   workflow_dispatch:         # 支持手动触发
 
@@ -12,11 +12,16 @@ permissions:
 jobs:
   monitor:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    # 5 分钟偏紧：pip 安装 matplotlib + 预警接口指数退避重试（3 个 adcode）+ nmc 台风接口多次调用，
+    # 网络较慢时可能超时（超时会导致状态不落盘 -> 下轮重复推送），故放宽到 10 分钟
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
-      # 网络层使用标准库 urllib，无需 pip 安装任何依赖，运行更快更稳
+      - name: 安装依赖
+        run: python3 -m pip install --quiet matplotlib
+
+      # 网络层使用标准库 urllib；matplotlib 用于生成台风路径图（中文字体已随仓库提供）
       - name: 运行监控
         env:
           WECHAT_WEBHOOK: ${{ secrets.WECHAT_WEBHOOK }}
