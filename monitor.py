@@ -422,10 +422,24 @@ def content_sig(a):
     - 不含 effective（每次继续发布都会变），否则去重形同失效；
     - 纳入官方灾种代码，等级升降（代码末位变化）也能被捕获。
     结果：风力加大 / 雨量上调 / 等级升降 都会通知，而单纯的"继续发布"不会重复打扰。
+
+    ⚠️ 返回值必须是「纯 JSON 结构」（只含 str / list，不要用 tuple）：
+    指纹要落盘到 state.json，下一轮从磁盘读回后 tuple 会变成 list。
+    若写入时用 tuple、比较时又与读回的 list 直接比，则恒不相等，
+    会导致每一轮都被误判成"内容有变动"而重复推送同一条预警。
     """
-    extra = tuple(sorted((str(k), str(v)) for k, v in (a.get("raw_extra") or {}).items()))
-    return (norm_text(a["headline"]), norm_text(a["description"]),
-            a["level"], a["type"], extra)
+    extra = [[str(k), str(v)] for k, v in sorted((a.get("raw_extra") or {}).items())]
+    return [norm_text(a["headline"]), norm_text(a["description"]),
+            a["level"], a["type"], extra]
+
+
+def sig_key(sig):
+    """把内容指纹规整成可稳定比较的字符串（递归消除 tuple / list 差异）。
+
+    指纹需要跨进程比对（Actions 每轮都是全新进程，读的是落盘的 state.json），
+    因此统一序列化为 JSON 文本再比，避免容器类型不一致造成"永远判定为已变化"。
+    """
+    return json.dumps(sig, ensure_ascii=False, sort_keys=True, default=list)
 
 
 def collect():
@@ -637,38 +651,156 @@ def push_tier(a):
     return None  # 蓝/黄/海上：仅进入每日报告，不弹群消息
 
 
-def push_alert_graded(a, repeat=False):
-    """按等级分级推送。返回是否成功发出。
+# 企业微信 markdown 单条内容上限 4096 字节，预留安全余量
+WECOM_MD_MAX_BYTES = 3800
+# 企业微信 text 单条内容上限约 2048 字节
+WECOM_TEXT_MAX_BYTES = 1900
+# 合并卡中单条预警正文的显示上限（字符）。省级预警正文可能极长，
+# 截断后由"点击查看"链接承载完整内容，避免单条就把整张卡撑爆。
+ALERT_CORE_MAX_CHARS = 400
 
-    红  -> text(含@all) + markdown 详情卡（text 保证全员必达，详情卡保留完整信息）
-    橙  -> markdown 详情卡 + text(含@all) 提示（markdown 不支持 @all，故补一条 text 触发提醒）
-    蓝/黄/海上 -> 不在此推送（由每日报告汇总）
+
+def clip_core(s, limit=ALERT_CORE_MAX_CHARS):
+    """截断过长的预警正文（保留完整内容入口由链接承担）。"""
+    if not s:
+        return s
+    s = str(s)
+    if len(s) <= limit:
+        return s
+    return s[:limit].rstrip("，。、,;； ") + "……（完整内容请点下方链接查看）"
+
+
+def split_md(text, limit=WECOM_MD_MAX_BYTES):
+    """按字节预算把长 markdown 拆成多片。
+
+    依次尝试：整段直发 → 按空行切 → 按行切 → 按字符硬切（兜底）。
+    中文 UTF-8 约 3 字节/字，且官方预警正文常为一整行长句，
+    因此必须有"字符级硬切"，否则可能发出超限内容被企业微信直接丢弃。
     """
-    tier = push_tier(a)
-    if tier is None:
-        return False
-    title = alert_title(a)
-    core = alert_core(a)
-    note = "（持续预警·每2小时提醒）" if repeat else ""
-    if tier == "red":
-        text = title + "\n"
-        if core:
-            text += core + "\n"
-        text += (f"发布：{a['issuer'] or a['region']} ｜ {a['effective']}{note}\n"
-                 f"防御指引：{level_advice(a)}")
+    if len(text.encode("utf-8")) <= limit:
+        return [text]
+
+    def cut_hard(s):
+        out, cur = [], ""
+        for ch in s:
+            if cur and len((cur + ch).encode("utf-8")) > limit:
+                out.append(cur)
+                cur = ch
+            else:
+                cur += ch
+        if cur:
+            out.append(cur)
+        return out
+
+    parts, cur = [], []
+    for seg in text.split("\n\n"):
+        trial = "\n\n".join(cur + [seg])
+        if cur and len(trial.encode("utf-8")) > limit:
+            parts.append("\n\n".join(cur))
+            cur = [seg]
+        else:
+            cur.append(seg)
+    if cur:
+        parts.append("\n\n".join(cur))
+
+    out = []
+    for p in parts:
+        if len(p.encode("utf-8")) <= limit:
+            out.append(p)
+            continue
+        buf = ""
+        for ln in p.split("\n"):
+            cand = (buf + "\n" + ln) if buf else ln
+            if buf and len(cand.encode("utf-8")) > limit:
+                out.append(buf)
+                buf = ln
+            else:
+                buf = cand
+        if buf:
+            out.extend(cut_hard(buf) if len(buf.encode("utf-8")) > limit else [buf])
+    return out
+
+
+def push_alerts(items):
+    """把一轮内需要推送的预警「合并」成最多 2 条消息发出。
+
+    items: [(alert, repeat_flag), ...]，已通过 should_push / push_tier 筛选。
+    返回成功推送的预警条数（按预警计数，便于日志统计）。
+
+    合并策略（保留原有分级语义，同时避免一次轮询刷屏）：
+      - 含红色：先发 text（@all，逐条列出等级+标题，红色附核心与防御指引），
+                再发一张合并 markdown 详情卡（text 保证全员必达）；
+      - 仅橙色：先发合并 markdown 详情卡，再发 text（@all 一行提醒，用于触发提醒）；
+    多条预警共用同一条消息；超出字节上限时自动分片。
+    每条预警仍单独写入推送日志，保持可溯源。
+    """
+    items = [(a, r) for a, r in items if a]
+    if not items:
+        return 0
+    alerts = [a for a, _ in items]
+    n = len(alerts)
+    has_red = any(a["level"] == "红色" for a in alerts)
+
+    # ---- 合并 markdown 详情卡（多条预警共用一个头 + 指引 + 链接 + 来源）----
+    blocks = [fmt_alert_block(a, repeat=r) for a, r in items]
+    head = f"⚠️ **生效预警（{n} 条）**" if n > 1 else "⚠️ **预警生效**"
+
+    # 防御指引：多条预警指引相同时只保留一份，避免重复占版面
+    adv_pairs = []
+    for a in alerts:
+        adv = level_advice(a)
+        if adv and not any(adv == x[1] for x in adv_pairs):
+            adv_pairs.append((f"{a.get('type') or ''}{a.get('level') or ''}", adv))
+    if len(adv_pairs) == 1:
+        adv_lines = [f"> 防御指引：{adv_pairs[0][1]}"]
+    elif adv_pairs:
+        adv_lines = ["> 防御指引："] + [f"> · {lab}：{adv}" for lab, adv in adv_pairs]
+    else:
+        adv_lines = []
+
+    link = (f"> [实时台风路径·点击查看]({TYPHOON_TRACK_URL})"
+            if any(a.get("type") == "台风" for a in alerts)
+            else f"> [预警详情·点击查看]({WARN_DETAIL_URL})")
+    md = "\n\n".join([head] + blocks + adv_lines + [link, "> 数据来源：中国气象局·中央气象台"])
+
+    # ---- text 内容（企业微信仅 text 消息支持 @all，上限约 2048 字节）----
+    title_lines = [f"【{a['level']}】{a['issuer'] or a['region']} · {a.get('type') or ''}预警"
+                   for a in alerts]
+    hint = ("🔴 红色预警已生效，请立即做好防御：" if has_red
+            else "橙色预警已生效，请关注并做好防御：")
+    tlines = [hint] + list(title_lines)
+    if has_red:
+        for a in alerts:
+            if a["level"] != "红色":
+                continue
+            core = clip_core(alert_core(a), 200)
+            if core:
+                tlines.append(f"　{core}")
+            tlines.append(f"　防御指引：{level_advice(a)}")
+    text = "\n".join(tlines)
+    if len(text.encode("utf-8")) > WECOM_TEXT_MAX_BYTES:
+        # 保险：正文过长的极端场景下只保留标题行，确保 @all 提醒必达
+        text = "\n".join([hint] + title_lines + ["（详细内容见下方预警卡，请及时防御）"])
+
+    # ---- 发送：红色优先 text（必达），橙色优先详情卡 ----
+    ok_m = ok_t = False
+    if has_red:
         ok_t = wechat_text(text, mention_list=["@all"])
-        ok_m = wechat_markdown(fmt_alert(a, repeat=repeat))   # 详情卡（@all 由上方 text 保证）
-        ok = ok_t or ok_m
-        record_push("alert", a, msgtype="text+markdown",
-                    extra={"tier": "red", "repeat": repeat, "ok": ok})
-    else:  # orange
-        ok_m = wechat_markdown(fmt_alert(a, repeat=repeat))
-        ok_t = wechat_text(f"⚠️ {title}{a.get('region', '')}已生效，请全员关注防御。",
-                           mention_list=["@all"])
-        ok = ok_t or ok_m
+        for chunk in split_md(md):
+            ok_m = wechat_markdown(chunk) or ok_m
+    else:
+        for chunk in split_md(md):
+            ok_m = wechat_markdown(chunk) or ok_m
+        ok_t = wechat_text(text, mention_list=["@all"])
+    ok = bool(ok_m or ok_t)
+
+    for a, r in items:
         record_push("alert", a, msgtype="markdown+text",
-                    extra={"tier": "orange", "repeat": repeat, "ok": ok})
-    return ok
+                    extra={"tier": "red" if a["level"] == "红色" else "orange",
+                           "repeat": r, "batch": n, "ok": ok})
+    if n > 1:
+        log(f"合并推送 {n} 条预警（1 条详情卡 + 1 条 @all 提醒）")
+    return n if ok else 0
 
 
 def load_cjk_font():
@@ -832,19 +964,22 @@ def alert_core(a):
     return ""
 
 
-def fmt_alert(a, repeat=False):
+def fmt_alert_block(a, repeat=False):
+    """合并详情卡中「单条预警」的引用块。
+
+    标题带发布机构：多条预警合并时，「县级暴雨橙」与「省级暴雨橙」的标题原本
+    完全相同（都是【暴雨橙色预警】），加上机构才能分辨来源。
+    防御指引、链接与数据来源由 push_alerts 在合并层统一附加，避免多条重复。
+    """
     note = " ｜ 持续预警·每2小时提醒" if repeat else ""
-    advice = level_advice(a)
-    link = (f"> [实时台风路径·点击查看]({TYPHOON_TRACK_URL})" if a.get("type") == "台风"
-            else f"> [预警详情·点击查看]({WARN_DETAIL_URL})")
-    lines = [f"> **{alert_title(a)}**"]
-    core = alert_core(a)
+    src = a["issuer"] or a["region"]
+    label = (f"{a.get('type') or ''}{a.get('level') or ''}预警"
+             if (a.get("type") or a.get("level")) else "气象预警")
+    lines = [f"> **{src} · {label}**"]
+    core = clip_core(alert_core(a))
     if core:
         lines.append(f"> {core}")
-    lines.append(f"> 发布：{a['issuer'] or a['region']} ｜ {a['effective']}{note}")
-    lines.append(f"> 防御指引：{advice}")
-    lines.append(link)
-    lines.append("> 数据来源：中国气象局·中央气象台")
+    lines.append(f"> 生效：{a['effective']}{note}")
     return "\n".join(lines)
 
 
@@ -1399,30 +1534,34 @@ def mode_poll():
                    and k not in META_STATE_KEYS
                    and not k.startswith("_")}
 
+    # 本轮需要发出的预警先收集，循环结束后「合并」推送：
+    # 无论一次有几条预警，最多只发 1 条详情卡 + 1 条 @all 提醒，避免刷屏。
+    pending = []   # [(alert, repeat_flag, state_key)]
+
     for a in active:
         rec = state.get(a["key"])
         if rec is None:
             # 新预警
-            pushed_now = False
-            if push_tier(a):   # 仅 红/橙 进入此分支；蓝/黄/海上不即时推送
-                push_alert_graded(a)
-                pushed_now = True
-                pushed += 1
+            will_push = bool(push_tier(a))   # 仅 红/橙；蓝/黄/海上不即时推送
             state[a["key"]] = {
                 "headline": a["headline"], "is_sea": a["is_sea"],
                 "description": a["description"], "effective": a["effective"],
                 "issuer": a["issuer"], "type": a["type"], "level": a["level"],
-                "sig": list(content_sig(a)),
-                "last_push": now if pushed_now else 0.0,
-                "pushed": pushed_now,
+                "sig": content_sig(a),
+                "last_push": 0.0,            # 推送成功后统一回填
+                "pushed": False,
             }
+            if will_push:
+                pending.append((a, False, a["key"]))
             changed = True
-            log(f"[新]{'推送' if pushed_now else '记录'}: {a['headline']}")
+            log(f"[新]{'待推送' if will_push else '记录'}: {a['headline']}")
             continue
 
         # 已有预警：比对"内容指纹"（已归一化，继续发布不算变化）
+        # 用 sig_key 规整后比较：指纹跨进程读写会经历 tuple↔list 转换，
+        # 直接比容器会恒不相等，导致每轮都误判为"内容变动"而重复推送。
         sig_now = content_sig(a)
-        if list(sig_now) != rec.get("sig"):
+        if sig_key(sig_now) != sig_key(rec.get("sig")):
             last = rec.get("last_push", 0.0) or 0.0
             tier = push_tier(a)
             old_rank = LEVEL_RANK.get(rec.get("level"), -1)
@@ -1430,11 +1569,8 @@ def mode_poll():
             downgraded = (bool(rec.get("pushed")) and old_rank >= 0 and new_rank >= 0
                           and new_rank < old_rank)
             if tier and (now - last) >= PUSH_DEDUP_SECONDS:
-                push_alert_graded(a)
-                pushed += 1
-                rec["last_push"] = now
-                rec["pushed"] = True
-                log(f"[变动] 推送: {a['headline']}")
+                pending.append((a, False, a["key"]))
+                log(f"[变动] 待推送: {a['headline']}")
             elif downgraded:
                 ok = wechat_markdown(
                     f"> **预警降级**：{rec.get('level')} → {a['level']}\n"
@@ -1452,19 +1588,28 @@ def mode_poll():
             rec.update({"headline": a["headline"], "is_sea": a["is_sea"],
                         "description": a["description"], "effective": a["effective"],
                         "issuer": a["issuer"], "type": a["type"], "level": a["level"],
-                        "sig": list(sig_now)})
+                        "sig": sig_now})
             changed = True
         else:
             # 未变动 -> 红/橙 持续提醒（每120分钟，且 ≥去重窗口）
             if push_tier(a):
                 last = rec.get("last_push", 0.0) or 0.0
                 if now - last >= REPUSH_INTERVAL:
-                    push_alert_graded(a, repeat=True)
-                    pushed += 1
+                    pending.append((a, True, a["key"]))
+                    changed = True
+                    log(f"[持续] 待提醒（每2小时）: {a['headline']}")
+
+    # 统一合并推送：多条预警共用 1 条详情卡 + 1 条 @all 提醒
+    if pending:
+        n_ok = push_alerts([(a, r) for a, r, _ in pending])
+        if n_ok:
+            pushed = n_ok
+            for _, _, k in pending:
+                rec = state.get(k)
+                if isinstance(rec, dict):
                     rec["last_push"] = now
                     rec["pushed"] = True
-                    changed = True
-                    log(f"[持续] 每2小时提醒: {a['headline']}")
+            changed = True
 
     # 预警解除通知（仅陆地、且曾推送过）
     lifted = 0

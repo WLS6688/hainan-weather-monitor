@@ -5,7 +5,7 @@
 
 | 文件 | 说明 |
 |------|------|
-| `push_log.jsonl` | **主审计日志**，每行一条 JSON，字段：时间、类型(kind)、预警类型/等级/区域、发布单位、标题、消息格式(msgtype)、附加信息（是否附图、持续提醒、剩余小时数等） |
+| `push_log.jsonl` | **主审计日志**，每行一条 JSON，字段：时间、类型(kind)、预警类型/等级/区域、发布单位、标题、消息格式(msgtype)、附加信息（是否附图、持续提醒、剩余小时数、本次合并条数 `batch` 等）。多条预警合并推送时，**每条预警各记一行**（`batch` 为同批条数），保证逐条可溯源 |
 | `archive/YYYY-MM.md` | **月度可读归档**，按自然月分文件，人可读、便于逐月翻查 |
 | `history.csv` | 导出文件（`--mode export` 生成），UTF-8 BOM，Excel 可直接打开 |
 | `history.md` | 导出文件（`--mode export --format md` 生成），Markdown 表格 |
