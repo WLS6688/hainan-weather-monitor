@@ -20,3 +20,5 @@
 {"ts": "2026-09-20 09:14:35", "kind": "daily_image", "msgtype": "image", "cn": "杜鹃"}
 {"ts": "2026-09-21 09:15:39", "kind": "daily", "msgtype": "markdown", "active": 0, "land": 0, "sea": 0, "typhoon": 0}
 {"ts": "2026-09-21 09:15:45", "kind": "daily_image", "msgtype": "image", "cn": "杜鹃"}
+{"ts": "2026-09-22 09:14:04", "kind": "daily", "msgtype": "markdown", "active": 1, "land": 0, "sea": 1, "typhoon": 0}
+{"ts": "2026-09-22 09:14:10", "kind": "daily_image", "msgtype": "image", "cn": "杜鹃"}
