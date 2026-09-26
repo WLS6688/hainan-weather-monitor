@@ -32,3 +32,4 @@
 {"ts": "2026-09-26 17:22:06", "kind": "alert", "msgtype": "markdown+text", "type": "暴雨", "level": "橙色", "region": "海口", "is_sea": false, "issuer": "海口市气象台", "effective": "2026/09/26 17:06", "headline": "海口市气象台发布暴雨橙色预警信号", "tier": "orange", "repeat": false, "batch": 1, "ok": true}
 {"ts": "2026-09-26 18:24:26", "kind": "lifted", "msgtype": "markdown", "level": "橙色", "type": "暴雨", "region": null, "headline": "海口市气象台发布暴雨橙色预警信号", "ok": true}
 {"ts": "2026-09-26 18:32:02", "kind": "alert", "msgtype": "markdown+text", "type": "暴雨", "level": "橙色", "region": "海口", "is_sea": false, "issuer": "海口市气象台", "effective": "2026/09/26 17:06", "headline": "海口市气象台发布暴雨橙色预警信号", "tier": "orange", "repeat": false, "batch": 1, "ok": true}
+{"ts": "2026-09-26 19:19:24", "kind": "lifted", "msgtype": "markdown", "level": "橙色", "type": "暴雨", "region": null, "headline": "海口市气象台发布暴雨橙色预警信号", "ok": true}
