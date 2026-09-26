@@ -27,3 +27,5 @@
 {"ts": "2026-09-24 09:15:43", "kind": "daily_image", "msgtype": "image", "cn": "舒力基"}
 {"ts": "2026-09-25 09:15:24", "kind": "daily", "msgtype": "markdown", "active": 2, "land": 1, "sea": 1, "typhoon": 0}
 {"ts": "2026-09-25 09:15:31", "kind": "daily_image", "msgtype": "image", "cn": "舒力基"}
+{"ts": "2026-09-26 09:14:30", "kind": "daily", "msgtype": "markdown", "active": 0, "land": 0, "sea": 0, "typhoon": 0}
+{"ts": "2026-09-26 09:14:34", "kind": "daily_image", "msgtype": "image", "cn": "舒力基"}
