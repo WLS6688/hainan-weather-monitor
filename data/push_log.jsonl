@@ -29,3 +29,4 @@
 {"ts": "2026-09-25 09:15:31", "kind": "daily_image", "msgtype": "image", "cn": "舒力基"}
 {"ts": "2026-09-26 09:14:30", "kind": "daily", "msgtype": "markdown", "active": 0, "land": 0, "sea": 0, "typhoon": 0}
 {"ts": "2026-09-26 09:14:34", "kind": "daily_image", "msgtype": "image", "cn": "舒力基"}
+{"ts": "2026-09-26 17:22:06", "kind": "alert", "msgtype": "markdown+text", "type": "暴雨", "level": "橙色", "region": "海口", "is_sea": false, "issuer": "海口市气象台", "effective": "2026/09/26 17:06", "headline": "海口市气象台发布暴雨橙色预警信号", "tier": "orange", "repeat": false, "batch": 1, "ok": true}
