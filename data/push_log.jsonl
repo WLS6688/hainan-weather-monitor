@@ -35,3 +35,5 @@
 {"ts": "2026-09-26 19:19:24", "kind": "lifted", "msgtype": "markdown", "level": "橙色", "type": "暴雨", "region": null, "headline": "海口市气象台发布暴雨橙色预警信号", "ok": true}
 {"ts": "2026-09-27 09:15:49", "kind": "daily", "msgtype": "markdown", "active": 2, "land": 1, "sea": 1, "typhoon": 0}
 {"ts": "2026-09-27 09:15:53", "kind": "daily_image", "msgtype": "image", "cn": "舒力基"}
+{"ts": "2026-09-28 09:16:52", "kind": "daily", "msgtype": "markdown", "active": 1, "land": 1, "sea": 0, "typhoon": 0}
+{"ts": "2026-09-28 09:17:05", "kind": "daily_image", "msgtype": "image", "cn": "舒力基"}
