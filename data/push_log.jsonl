@@ -44,3 +44,5 @@
 {"ts": "2026-10-01 09:18:31", "kind": "daily_image", "msgtype": "image", "cn": "彩云"}
 {"ts": "2026-10-02 09:17:55", "kind": "daily", "msgtype": "markdown", "active": 0, "land": 0, "sea": 0, "typhoon": 0}
 {"ts": "2026-10-02 09:18:00", "kind": "daily_image", "msgtype": "image", "cn": "彩云"}
+{"ts": "2026-10-03 09:16:57", "kind": "daily", "msgtype": "markdown", "active": 1, "land": 0, "sea": 1, "typhoon": 0}
+{"ts": "2026-10-03 09:17:01", "kind": "daily_image", "msgtype": "image", "cn": "彩云"}
