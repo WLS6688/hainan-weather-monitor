@@ -2,12 +2,28 @@ name: 海南台风预警监控
 
 on:
   schedule:
-    - cron: "*/10 * * * *"   # 每 10 分钟轮询（仓库已设为 Public，Actions 分钟数不限）
-    - cron: "0 1 * * *"      # 每天 09:00 北京时间 每日报告（UTC 01:00）
-  workflow_dispatch:         # 支持手动触发
+    # 全部避开整点：GitHub Actions 在「每小时整点」负载最高，schedule 事件会被延迟数小时
+    # 甚至直接丢弃（实测本仓库曾出现单次延迟 5 小时、以及连续 2 小时零执行的情况）。
+    - cron: "3,13,23,33,43,53 * * * *"  # 每 10 分钟轮询（跳过整点，避开负载高峰）
+    - cron: "7 1 * * *"                 # 每日报告主触发：北京时间 09:07（UTC 01:07）
+    - cron: "7 2 * * *"                 # 每日报告冗余触发：北京时间 10:07，靠 last_daily_report_date 去重，不会重复推
+  workflow_dispatch:                    # 手动触发 / 供外部定时服务调用（备选方案入口）
+    inputs:
+      mode:
+        description: 运行模式
+        type: choice
+        options:
+          - poll
+          - daily
+        default: poll
 
 permissions:
   contents: write            # 用于把 state.json 提交回仓库（持久化去重）
+
+# 同一时刻只允许一个 run 推进，避免并发写 state.json 造成状态互相覆盖
+concurrency:
+  group: hainan-monitor
+  cancel-in-progress: false
 
 jobs:
   monitor:
@@ -22,15 +38,27 @@ jobs:
         with:
           persist-credentials: true
 
+      # 缓存 pip：每轮省下 10~20 秒的 matplotlib 安装时间，降低排队与超时概率
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-mpl
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
       - name: 安装依赖
         run: python3 -m pip install --quiet matplotlib
 
       # 网络层使用标准库 urllib；matplotlib 用于生成台风路径图（中文字体已随仓库提供）
+      # ⚠️ 修改上面的 cron 表达式时，下面的判断串必须同步修改，
+      #    否则每日报告会静默降级为普通轮询（不发日报也不报错）
       - name: 运行监控
         env:
           WECHAT_WEBHOOK: ${{ secrets.WECHAT_WEBHOOK }}
         run: |
-          if [ "${{ github.event.schedule }}" = "0 1 * * *" ]; then
+          sched="${{ github.event.schedule }}"
+          input_mode="${{ github.event.inputs.mode }}"
+          if [ "$input_mode" = "daily" ] || [ "$sched" = "7 1 * * *" ] || [ "$sched" = "7 2 * * *" ]; then
             python3 monitor.py --mode daily
           else
             python3 monitor.py --mode poll

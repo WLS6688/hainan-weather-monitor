@@ -1684,6 +1684,18 @@ def mode_poll():
     for e in errors:
         log("ERR:", e)
 
+    # 迟到的每日报告补发：GitHub 丢弃 schedule 事件时，09:00 的日报可能整天不触发。
+    # 这里让每一轮成功的 poll 都检查一次，把"1 次机会"变成"144 次机会"。
+    try:
+        bj = datetime.now(BEIJING)
+        caught_up_today = state.get("last_daily_report_date") == bj.strftime("%Y-%m-%d")
+        if (not caught_up_today and WEBHOOK
+                and (bj.hour, bj.minute) >= DAILY_CATCHUP_AFTER):
+            log(f"检测到今日每日报告尚未发送（当前北京时间 {bj:%H:%M}），本轮补发")
+            mode_daily()
+    except Exception as e:
+        log("每日报告补发失败:", repr(e))
+
 
 def pick_primary_typhoon():
     """返回对海南影响最直接的活跃台风 det（dict，含 cn 字段），无则返回 None。"""
@@ -1709,6 +1721,15 @@ def pick_primary_typhoon():
     return best
 
 
+# 每日报告「迟到补发」起始时刻（北京时间 hour, minute）。
+# 背景：GitHub Actions 的 schedule 在「每小时整点」负载最高，事件会被延迟数小时甚至直接丢弃，
+# 导致 09:00 的日报 cron 一整天不触发（实测出现过延迟 3 小时、以及整天不执行的情况）。
+# 对策：把日报从「每天只有 1 次机会」变成「每一轮 poll 都是一次机会」——只要已过该时刻
+# 且当天尚未发送，就在本轮 poll 里补发。mode_daily() 内部自带 last_daily_report_date 去重，
+# 正常 cron 已发送时不会重复推。
+DAILY_CATCHUP_AFTER = (9, 25)   # 09:25 之后才允许补发，给正常的 09:07 cron 留出执行窗口
+
+
 def mode_daily():
     state = load_state()
     today = datetime.now(BEIJING).strftime("%Y-%m-%d")
@@ -1728,9 +1749,15 @@ def mode_daily():
     def lv(a):
         return a["level"] or "未知"
 
+    bj = datetime.now(BEIJING)
     lines = ["> 【澄迈自然灾害预警每日报告】",
-             f"> 生成时间：{datetime.now(BEIJING).strftime('%Y-%m-%d %H:%M')}",
+             f"> 生成时间：{bj.strftime('%Y-%m-%d %H:%M')}",
              f"> 今日生效预警：共 {len(active)} 条（台风 {len(typhoon_alerts)} 条）"]
+    # 正常应在 09:07 由 cron 直接触发。若此时已明显偏晚，说明 GitHub 把 schedule 事件
+    # 延迟或丢弃了，本次是由某一轮 poll 补发的——在报告里标出来，便于判断调度健康度。
+    if (bj.hour, bj.minute) > (9, 30):
+        lines.append("> ⚠️ 延迟补发：正常应在 09:07 发出，本次由轮询兜底触发，"
+                     "说明 GitHub 定时任务被延迟或丢弃")
 
     # 一、陆地预警（按等级；红/橙已实时推送，蓝/黄仅日报）
     lines.append("> —— 一、陆地预警（按等级） ——")
@@ -1741,7 +1768,11 @@ def mode_daily():
             for a in land:
                 if a["level"] != lvl:
                     continue
-                tag = "已实时推送" if lvl in ("红色", "橙色") else "未推送·仅日报"
+                # 以 state 里实际是否推送过为准，而不是按等级推断：
+                # 非澄迈/海口的红橙预警并不会实时推送，按等级标注会误导。
+                rec = state.get(a.get("key"))
+                really = isinstance(rec, dict) and bool(rec.get("pushed"))
+                tag = "已实时推送" if really else "未实时推送·仅日报"
                 lines.append(f"> ・[{lv(a)}]{a['type']} {a['headline']}（{tag}）")
 
     # 二、海上预警专区（仅展示·不实时推送）
@@ -1782,10 +1813,22 @@ def mode_daily():
     lines.append("> ——")
     lines.append("> 数据来源：中国气象局·中央气象台（预警）／ 中央气象台台风网 nmc（路径）")
 
-    wechat_markdown("\n".join(lines))
+    md = "\n".join(lines)
+    parts = split_md(md)      # 预警多时单片会超过企业微信上限被整体丢弃，必须分片
+    ok = True
+    for i, part in enumerate(parts, 1):
+        r = wechat_markdown(part)
+        ok = ok and r
+        log(f"每日报告 {i}/{len(parts)} 片推送{'成功' if r else '失败'}")
     record_push("daily", msgtype="markdown",
                 extra={"active": len(active), "land": len(land), "sea": len(sea),
-                       "typhoon": len(typhoon_alerts)})
+                       "typhoon": len(typhoon_alerts), "parts": len(parts), "ok": ok})
+
+    # 推送失败时不标记完成：让「迟到补发」在下一轮 poll 自动重试。
+    # 原实现无论成功失败都写 last_daily_report_date，一次失败＝当天日报永久丢失。
+    if not ok:
+        log("每日报告推送失败，不标记今日已完成，等待下一轮补发")
+        return
 
     # 附台风路径图（取对海南影响最直接的活跃台风；方案 A 用 image 消息呈现）
     det_primary = pick_primary_typhoon()
