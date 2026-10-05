@@ -52,3 +52,4 @@
 {"ts": "2026-10-05 08:10:45", "kind": "alert", "msgtype": "markdown+text", "type": "暴雨", "level": "橙色", "region": "澄迈", "is_sea": false, "issuer": "澄迈县气象台", "effective": "2026/10/05 04:12", "headline": "澄迈县气象台发布暴雨橙色预警信号", "tier": "orange", "repeat": true, "batch": 1, "ok": true}
 {"ts": "2026-10-05 10:54:14", "kind": "daily", "msgtype": "markdown", "active": 3, "land": 2, "sea": 1, "typhoon": 0, "parts": 1, "ok": true}
 {"ts": "2026-10-05 10:54:21", "kind": "daily_image", "msgtype": "image", "cn": "小熊\n"}
+{"ts": "2026-10-05 11:12:01", "kind": "lifted", "msgtype": "markdown", "level": "橙色", "type": "暴雨", "region": null, "headline": "澄迈县气象台发布暴雨橙色预警信号", "ok": true}
