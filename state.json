@@ -5,7 +5,7 @@
   "fail_streak": 0,
   "imminent_alerted": {},
   "disturbance_alerted": {},
-  "_dist_last_check": 1791221507.9526725,
+  "_dist_last_check": 1791231723.2514179,
   "46000041600000|p0015": {
     "headline": "海南省气象台发布雷雨大风黄色预警信号",
     "is_sea": false,
@@ -118,7 +118,7 @@
         ]
       ]
     ],
-    "last_push": 1791221499.211297,
+    "last_push": 1791231713.1351838,
     "pushed": true
   },
   "46902341600000|p0007": {
