@@ -5,7 +5,7 @@
   "fail_streak": 0,
   "imminent_alerted": {},
   "disturbance_alerted": {},
-  "_dist_last_check": 1791150013.185528,
+  "_dist_last_check": 1791159047.7532227,
   "46010041600000|p0012": {
     "headline": "海口市气象台发布雷电黄色预警信号",
     "is_sea": false,
@@ -95,7 +95,7 @@
         ]
       ]
     ],
-    "last_push": 1791150005.6606488,
+    "last_push": 1791159041.1302302,
     "pushed": true
   },
   "46902341600000|p0015": {
