@@ -124,7 +124,10 @@ PROVINCE_ISSUERS = ("海南省气象台", "海南省气象局", "海南省气象
 # 2026-10-06 调整：原 9 类（另含 洪水/山洪/风暴潮/海浪），按用户要求收敛为 5 类。
 # 去掉的四类：洪水、山洪（多伴随暴雨预警同步发布，重复度极高）、风暴潮、海浪（均为海上，
 # 澄迈陆地场景用不上）。如需恢复，往下列表里加回即可。
-TARGET_TYPES = ["台风", "暴雨", "大风", "雷电", "地质灾害"]
+TARGET_TYPES = ["台风", "暴雨", "大风", "雷电", "地质灾害", "风暴潮", "海浪"]
+# 沿海例外：这两类本质是海上灾害，但用户需要（老城靠海、马村港一带作业），
+# 故豁免"海上预警不推送/不进日报"的规则；其余海上类（海上大风、海上雷雨大风等）照旧过滤。
+COASTAL_TYPES = {"风暴潮", "海浪"}
 # 台风家族别名归一化：标题里出现这些词时统一归为“台风”类
 TYPHOON_ALIASES = ["热带风暴", "热带气旋", "热带低压", "强热带风暴", "超强台风", "强台风"]
 # 兜底解析用关键词：正则未命中时，从标题/描述里按关键词识别灾种与等级（避免漏报）
@@ -413,6 +416,14 @@ def parse(w):
     key = (f"{prefix}|{disaster}" if (prefix or disaster)
            else (raw_id or norm_text(headline) or headline))
 
+    is_sea = (any(k in (headline or "") for k in SEA_KEYWORDS)
+              or any(k in (desc or "") for k in SEA_DESC_STRICT))
+    # 沿海例外：风暴潮/海浪虽属海上灾害，但用户要的就是这两类（老城靠海、马村港一带），
+    # 若按普通海上规则过滤，它们会连日报都进不去——加回来等于白加。
+    # 因此对这两类豁免海上判定，按陆地预警的流程走（照样受老城镇过滤约束）。
+    if wtype in COASTAL_TYPES:
+        is_sea = False
+
     return {
         "id": w.get("id"),
         "key": key,
@@ -422,8 +433,7 @@ def parse(w):
         "level": level,
         "effective": w.get("effective", ""),
         "description": desc,
-        "is_sea": (any(k in (headline or "") for k in SEA_KEYWORDS)
-                   or any(k in (desc or "") for k in SEA_DESC_STRICT)),
+        "is_sea": is_sea,
         "raw_extra": {"type": raw_type} if raw_type else {},
     }
 
