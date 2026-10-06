@@ -87,6 +87,30 @@ HEADERS = {
 REGIONS = {"澄迈": "469023"}
 # 陆上即时推送目标区域：预警影响这些区域（且非海上）时才实时推送；其余只进每日报告
 PUSH_REGIONS = ["澄迈"]
+# —— 关注点位精确到「澄迈老城镇」——
+# 澄迈县气象台的预警常点名到镇（如"金江镇过去1小时降雨…"）。只点名了别的镇、没提老城时，
+# 说明这波天气当下不在老城：不即时推送、也不 @all（避免半夜被无关预警叫醒），
+# 但仍然进每日报告并标注"未点名老城"，不至于彻底漏掉。
+# 反过来，只要文案出现"老城"（覆盖"老城镇""老城开发区""澄迈老城"等写法），一律正常推送并 @。
+CHENGMAI_TOWNS = ["金江", "老城", "福山", "桥头", "瑞溪", "永发",
+                  "中兴", "加乐", "文儒", "仁兴", "大丰"]
+FOCUS_TOWN = "老城"
+
+
+def town_scope(a):
+    """预警与老城的关系：
+      focus  -> 文案点名了老城：正常推送并 @all
+      county -> 没点名任何澄迈镇（写"我县""澄迈县""大部地区"等）：当作全县预警，正常推送并 @all
+      other  -> 点名了澄迈其他镇但没提老城：不即时推送、不 @，仍进每日报告
+    """
+    text = f"{a.get('headline') or ''} {a.get('description') or ''}"
+    if FOCUS_TOWN in text:
+        return "focus"
+    if any(t in text for t in CHENGMAI_TOWNS):
+        return "other"
+    return "county"
+
+
 PROVINCE = "46"  # 海南省（兜底：抓全省预警，推送时再筛“澄迈相关”）
 # 省级兜底列表会同时返回全省各市县自行发布的预警（如"三亚市气象台发布暴雨橙色预警"）。
 # 它们不属于监控范围，若全量收录会让每日报告被几十条其他市县预警淹没，
@@ -889,6 +913,24 @@ def push_alerts(items):
         ok_t = wechat_text(text, mention_list=["@all"])
     ok = bool(ok_m or ok_t)
 
+    # 台风类预警顺带发一张路径图——沿用日报那把锁：只有当前位置或预报路径进入
+    # 海南关注框（relevance >= 1）的台风才画图，跟海南无关的台风只发文字，不占图片消息。
+    if any(a.get("type") == "台风" for a in alerts):
+        try:
+            det = pick_primary_typhoon()
+            if det and det.get("relevance", 0) >= 1:
+                cur = det["cur"]
+                km = haversine(cur["lat"], cur["lon"], CHENGMAI_LAT, CHENGMAI_LON)
+                img = render_track_image(cur, det["forecast"], det.get("track"),
+                                         title=f"台风“{det.get('cn', '')}”路径预报"
+                                               f" ｜ 距澄迈约 {int(round(km))} 公里")
+                if img:
+                    wechat_image(img)
+                    record_push("alert_track_image", msgtype="image",
+                                extra={"cn": det.get("cn", "")})
+        except Exception as e:
+            log("台风预警附图失败（不影响已发出的预警）:", repr(e))
+
     for a, r in items:
         record_push("alert", a, msgtype="markdown+text",
                     extra={"tier": "red" if a["level"] == "红色" else "orange",
@@ -1059,6 +1101,24 @@ def alert_core(a):
     return ""
 
 
+def impact_until(text, base=None):
+    """从正文的"未来N小时 / 未来N天"推算影响结束时刻。
+
+    官方文案常用"预计未来5小时，我市…仍将有30-50毫米的降水"，
+    转成"预计影响至 04:15"比让使用者自己心算直观。
+    """
+    flat = re.sub(r"\s+", "", text or "")
+    m = re.search(r"未来(\d{1,2})(小时|天)", flat)
+    if not m:
+        return None
+    n = int(m.group(1))
+    if n <= 0 or n > 240:
+        return None
+    base = base or datetime.now(BEIJING)
+    t = base + (timedelta(hours=n) if m.group(2) == "小时" else timedelta(days=n))
+    return t.strftime("%H:%M") if m.group(2) == "小时" else t.strftime("%m-%d %H:%M")
+
+
 def fmt_alert_block(a, repeat=False):
     """合并详情卡中「单条预警」的引用块。
 
@@ -1074,7 +1134,9 @@ def fmt_alert_block(a, repeat=False):
     core = clip_core(alert_core(a))
     if core:
         lines.append(f"> {core}")
-    lines.append(f"> 生效：{a['effective']}{note}")
+    until = impact_until(a.get("description") or "")
+    until_txt = f" ｜ 预计影响至 {until}" if until else ""
+    lines.append(f"> 生效：{a['effective']}{until_txt}{note}")
     return "\n".join(lines)
 
 
@@ -1640,7 +1702,8 @@ def mode_poll():
         rec = state.get(a["key"])
         if rec is None:
             # 新预警
-            will_push = bool(push_tier(a))   # 仅 红/橙；蓝/黄/海上不即时推送
+            # 仅 红/橙；蓝/黄/海上不即时推送；点名了澄迈其他镇（没提老城）的也不即时推送
+            will_push = bool(push_tier(a)) and town_scope(a) != "other"
             state[a["key"]] = {
                 "headline": a["headline"], "is_sea": a["is_sea"],
                 "description": a["description"], "effective": a["effective"],
@@ -1667,10 +1730,11 @@ def mode_poll():
             new_rank = LEVEL_RANK.get(a["level"], -1)
             downgraded = (bool(rec.get("pushed")) and old_rank >= 0 and new_rank >= 0
                           and new_rank < old_rank)
-            if tier and (now - last) >= PUSH_DEDUP_SECONDS:
+            in_focus = town_scope(a) != "other"
+            if tier and in_focus and (now - last) >= PUSH_DEDUP_SECONDS:
                 pending.append((a, False, a["key"]))
                 log(f"[变动] 待推送: {a['headline']}")
-            elif downgraded:
+            elif downgraded and in_focus:
                 ok = wechat_markdown(
                     f"> **预警降级**：{rec.get('level')} → {a['level']}\n"
                     f"> {alert_title(a)}\n"
@@ -1690,8 +1754,8 @@ def mode_poll():
                         "sig": sig_now})
             changed = True
         else:
-            # 未变动 -> 红/橙 持续提醒（每120分钟，且 ≥去重窗口）
-            if push_tier(a):
+            # 未变动 -> 红/橙 持续提醒（每120分钟，且 ≥去重窗口；点名其他镇的跳过）
+            if push_tier(a) and town_scope(a) != "other":
                 last = rec.get("last_push", 0.0) or 0.0
                 if now - last >= REPUSH_INTERVAL:
                     pending.append((a, True, a["key"]))
@@ -1954,7 +2018,10 @@ def mode_daily():
                     row += f" · {unit}"
                 if eff:
                     row += f" · {eff}"
-                lines.append(row + brief_extra(a))
+                row += brief_extra(a)
+                if town_scope(a) == "other":
+                    row += " ｜ 未点名老城（不即时推送）"
+                lines.append(row)
     else:
         lines.append("> ・无")   # 标题行已写明"今日无生效预警"，这里不再重复
 
