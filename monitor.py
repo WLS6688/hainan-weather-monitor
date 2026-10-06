@@ -488,6 +488,46 @@ def load_state():
         return {}
 
 
+def another_run_active():
+    """并发自检：返回 True 表示「已有一个更早的 run 正在跑」，本轮应当放弃。
+
+    背景：yml 里的 concurrency 只负责「排队」，实测仍会出现两个 run 重叠执行
+    （一个 run 卡在 waiting-for-runner 时不占用并发组）。此时若前一个 run 还没 commit，
+    两者读到同一份旧 state，就会各推一条解除通知 —— 群里 2 条、日志 1 条。
+
+    对策：开工前查一次 API，若有 id 更小（更早）的 run 处于 in_progress，
+    说明它正在处理同一批数据，本轮直接放弃，交给它完成即可（10 分钟后还有下一轮）。
+
+    仅在 Actions 环境生效（需要 GITHUB_RUN_ID / GITHUB_REPOSITORY / GH_TOKEN）；
+    查询失败时保守返回 False —— 宁可多跑一轮，也不让监控因 API 抖动整天停摆。
+    """
+    run_id = os.environ.get("GITHUB_RUN_ID")
+    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+    repo = os.environ.get("GITHUB_REPOSITORY")
+    if not (run_id and token and repo):
+        return False
+    try:
+        url = (f"https://api.github.com/repos/{repo}/actions/workflows/monitor.yml/runs"
+               f"?status=in_progress&per_page=10")
+        req = urllib.request.Request(url, headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "hainan-monitor"})
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        me = int(run_id)
+        others = [r for r in data.get("workflow_runs", [])
+                  if int(r["id"]) != me and int(r["id"]) < me]
+        if others:
+            log(f"并发自检：run {others[0]['id']} 正在运行，本轮跳过（避免重复推送）")
+            return True
+        log("并发自检：无其他活跃 run，继续执行")
+        return False
+    except Exception as e:
+        log("并发自检跳过（查询失败，按无并发处理）:", repr(e))
+        return False
+
+
 def sync_from_remote(state):
     """把工作区与内存里的 state 同步到远端 main 的最新版本（并发保护）。
 
@@ -1563,6 +1603,8 @@ def check_imminent(state):
 
 
 def mode_poll():
+    if another_run_active():
+        return
     now = time.time()
     state = load_state()
     sync_from_remote(state)   # 先对齐远端最新状态，避免与并发 run 重复推送"解除"
@@ -1779,6 +1821,8 @@ DAILY_CATCHUP_AFTER = (9, 25)   # 09:25 之后才允许补发，给正常的 09:
 
 
 def mode_daily():
+    if another_run_active():
+        return
     state = load_state()
     sync_from_remote(state)   # 同上：日报也靠 state 去重，并发时必须先对齐远端
     today = datetime.now(BEIJING).strftime("%Y-%m-%d")
