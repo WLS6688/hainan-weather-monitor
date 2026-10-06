@@ -36,6 +36,11 @@ jobs:
       # persist-credentials 显式开启：commit_state() 依赖它用内置 GITHUB_TOKEN 把 state.json 推回仓库
       - uses: actions/checkout@v7
         with:
+          # ref: main —— 关键。不写 ref 时 checkout 签出的是「触发本次 run 时记录的 SHA」，
+          # 两个 run 重叠执行时会拿到同一份旧 state.json，各自判定某条预警"解除"而重复推送
+          #（实测 2026-10-06 04:52 双发）。指定 main 才能签出最新代码 + 最新 state。
+          ref: main
+          fetch-depth: 1
           persist-credentials: true
 
       # 缓存 pip：每轮省下 10~20 秒的 matplotlib 安装时间，降低排队与超时概率
