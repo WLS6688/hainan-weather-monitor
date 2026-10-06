@@ -81,11 +81,13 @@ HEADERS = {
                   "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
     "Referer": "https://weather.cma.cn/",
 }
-# 直查区县（澄迈、海口；其余靠省级兜底覆盖）
-REGIONS = {"澄迈": "469023", "海口": "460100"}
+# 直查区县（仅澄迈；其余靠省级兜底覆盖）
+# 2026-10-06 调整：原为「澄迈 + 海口」，现按用户要求收敛为只监控澄迈。
+# 海口预警不再实时推送、也不再进入每日报告。
+REGIONS = {"澄迈": "469023"}
 # 陆上即时推送目标区域：预警影响这些区域（且非海上）时才实时推送；其余只进每日报告
-PUSH_REGIONS = ["澄迈", "海口"]
-PROVINCE = "46"  # 海南省（兜底：抓全省预警，推送时再筛“澄迈/海口相关”）
+PUSH_REGIONS = ["澄迈"]
+PROVINCE = "46"  # 海南省（兜底：抓全省预警，推送时再筛“澄迈相关”）
 # 省级兜底列表会同时返回全省各市县自行发布的预警（如"三亚市气象台发布暴雨橙色预警"）。
 # 它们不属于监控范围，若全量收录会让每日报告被几十条其他市县预警淹没，
 # 故只保留「省级台发布 / 标题正文命中澄迈·海口 / 台风类」三类。
@@ -93,8 +95,12 @@ PROVINCE_ISSUERS = ("海南省气象台", "海南省气象局", "海南省气象
                     "海南省气象灾害防御中心")
 # 监控的预警类型：
 #  - 台风（含热带风暴 / 强热带风暴 / 热带气旋 / 热带低压等全部强度等级，中国气象局均以“台风预警信号”发布）
-#  - 汛期及台风次生灾害：暴雨、大风、雷电、洪水、山洪、地质灾害、风暴潮、海浪
-TARGET_TYPES = ["台风", "暴雨", "大风", "雷电", "洪水", "山洪", "地质灾害", "风暴潮", "海浪"]
+#  - 汛期高发：暴雨、大风、雷电
+#  - 次生灾害：地质灾害
+# 2026-10-06 调整：原 9 类（另含 洪水/山洪/风暴潮/海浪），按用户要求收敛为 5 类。
+# 去掉的四类：洪水、山洪（多伴随暴雨预警同步发布，重复度极高）、风暴潮、海浪（均为海上，
+# 澄迈陆地场景用不上）。如需恢复，往下列表里加回即可。
+TARGET_TYPES = ["台风", "暴雨", "大风", "雷电", "地质灾害"]
 # 台风家族别名归一化：标题里出现这些词时统一归为“台风”类
 TYPHOON_ALIASES = ["热带风暴", "热带气旋", "热带低压", "强热带风暴", "超强台风", "强台风"]
 # 兜底解析用关键词：正则未命中时，从标题/描述里按关键词识别灾种与等级（避免漏报）
@@ -270,8 +276,9 @@ def fetch(adcode, tries=4):
 WMO_WEATHER = {
     0: "晴", 1: "大致晴朗", 2: "多云", 3: "阴",
     45: "雾", 48: "雾凇",
-    51: "小毛毛雨", 53: "毛毛雨", 55: "大毛毛雨",
-    56: "冻毛毛雨", 57: "强冻毛毛雨",
+    # 毛毛雨按中文习惯说成"细雨/小雨"，直译的"大毛毛雨"看着别扭
+    51: "细雨", 53: "小雨", 55: "中雨",
+    56: "冻雨（弱）", 57: "冻雨（强）",
     61: "小雨", 63: "中雨", 65: "大雨",
     66: "冻雨", 67: "强冻雨",
     71: "小雪", 73: "中雪", 75: "大雪", 77: "雪粒",
@@ -1819,6 +1826,35 @@ def pick_primary_typhoon():
 # 正常 cron 已发送时不会重复推。
 DAILY_CATCHUP_AFTER = (9, 25)   # 09:25 之后才允许补发，给正常的 09:07 cron 留出执行窗口
 
+# 每日报告「空提示」过滤词：命中这些词说明该段是"目前没事"的废话，极简版一律不输出。
+# 例："台风趋势提示：目前西北太平洋/南海无编号活跃台风。"
+#     "台风趋势提示：未来数日无预报路径直接影响海南的台风。"
+EMPTY_HINT_WORDS = ["无编号活跃台风", "无预报路径直接影响", "未来数日无",
+                    "未发现", "无明显", "暂无", "无热带扰动"]
+
+
+def brief_extra(a):
+    """极简日报里一条预警的补充信息。
+
+    官方 headline 大多是「XX气象台发布OO黄色预警信号」，与前面的 [等级]类型 完全重复，
+    整条照抄会让每行变成 30+ 字。这里先剥掉「发布单位 + 发布」「预警信号」「类型」「等级」，
+    若剩下的仍是实质内容（例如具体路段、影响时段），才附上并截断；否则只显示发布单位。
+    """
+    core = a.get("headline") or ""
+    iss = a.get("issuer") or ""
+    if iss:
+        core = core.replace(iss + "发布", "").replace(iss, "")
+    core = core.replace("预警信号", "").strip("：: ")
+    for t in (a.get("type") or "", a.get("level") or ""):
+        if t:
+            core = core.replace(t, "")
+    core = re.sub(r"[（(]\s*[）)]", "", core).strip("：:，, ")
+    unit = iss or a.get("region") or ""
+    if len(core) >= 10:
+        tail = core if len(core) <= 26 else core[:26] + "…"
+        return f" · {unit} ｜ {tail}" if unit else f" ｜ {tail}"
+    return f" · {unit}" if unit else ""
+
 
 def mode_daily():
     if another_run_active():
@@ -1843,68 +1879,37 @@ def mode_daily():
         return a["level"] or "未知"
 
     bj = datetime.now(BEIJING)
-    lines = ["> 【澄迈自然灾害预警每日报告】",
-             f"> 生成时间：{bj.strftime('%Y-%m-%d %H:%M')}",
-             f"> 今日生效预警：共 {len(active)} 条（台风 {len(typhoon_alerts)} 条）"]
-    # 正常应在 09:07 由 cron 直接触发。若此时已明显偏晚，说明 GitHub 把 schedule 事件
-    # 延迟或丢弃了，本次是由某一轮 poll 补发的——在报告里标出来，便于判断调度健康度。
-    if (bj.hour, bj.minute) > (9, 30):
-        lines.append("> ⚠️ 延迟补发：正常应在 09:07 发出，本次由轮询兜底触发，"
-                     "说明 GitHub 定时任务被延迟或丢弃")
-
-    # 一、陆地预警（按等级；红/橙已实时推送，蓝/黄仅日报）
-    lines.append("> —— 一、陆地预警（按等级） ——")
-    if not land:
-        lines.append("> 当前无生效陆地预警。")
-    else:
+    # —— 极简版每日报告（2026-10-06 改版）——
+    # 目标：4~5 行读完。相对旧版砍掉：分区标题（一、陆地/二、海上）、延迟补发说明、
+    # 海上预警专区、数据来源落款、「未实时推送·仅日报」标注；天气由 2 行压成 1 行；
+    # 台风/扰动只保留有实质内容的提示，且最多占 1 行。
+    head = f"> 【澄迈预警日报】{bj.strftime('%m-%d %H:%M')}"
+    if land:
+        lines = [f"{head} ｜ 生效 {len(land)} 条"]
         for lvl in ["红色", "橙色", "黄色", "蓝色"]:
             for a in land:
                 if a["level"] != lvl:
                     continue
-                # 以 state 里实际是否推送过为准，而不是按等级推断：
-                # 非澄迈/海口的红橙预警并不会实时推送，按等级标注会误导。
-                rec = state.get(a.get("key"))
-                really = isinstance(rec, dict) and bool(rec.get("pushed"))
-                tag = "已实时推送" if really else "未实时推送·仅日报"
-                lines.append(f"> ・[{lv(a)}]{a['type']} {a['headline']}（{tag}）")
-
-    # 二、海上预警专区（仅展示·不实时推送）
-    lines.append("> —— 二、海上预警专区（仅展示·不实时推送） ——")
-    if not sea:
-        lines.append("> 当前无生效海上预警。")
+                lines.append(f"> ・[{lv(a)}]{a['type']}{brief_extra(a)}")
     else:
-        for a in sea:
-            lines.append(f"> ・[{lv(a)}]{a['type']} {a['headline']}")
+        lines = [f"{head} ｜ 今日无生效预警"]
 
-    # 台风趋势提示（仅台风；基于 nmc 预报路径，仅作每日提示，不实时推送）
-    outlook = typhoon_outlook()
-    if outlook:
-        lines.append("> —— 台风趋势提示 ——")
-        lines.extend(outlook)
-    # 热带扰动监测（非官方；基于 Open-Meteo 近海风速+气压代理，覆盖未编号扰动）
-    dist = disturbance_outlook()
-    if dist:
-        lines.extend(dist)
+    # 台风趋势 / 热带扰动：有实质内容才占 1 行，且两者最多只显示一个
+    for hint in (typhoon_outlook(), disturbance_outlook()):
+        real = [h for h in (hint or []) if not any(k in h for k in EMPTY_HINT_WORDS)]
+        if real:
+            lines.append(real[0].rstrip())
+            break
 
-    # 台风路径可点击链接（有活跃台风时）
-    if typhoon_alerts:
-        lines.append(f"> [🌀 实时台风路径·点击查看]({TYPHOON_TRACK_URL})")
-
-    # 澄迈今日天气预报（Open-Meteo，免 key）
+    # 澄迈今日天气预报（Open-Meteo，免 key）压成 1 行
     fc = fetch_forecast()
     if fc and fc.get("temp_now") is not None:
         w_now = WMO_WEATHER.get(fc.get("code_now"), "未知")
         w_day = WMO_WEATHER.get(fc.get("code_day"), "未知")
-        lines.append("> 澄迈今日天气预报：")
-        lines.append(f"> ・现在：{w_now} {fc['temp_now']}℃ ｜ 湿度 {fc['humidity']}% ｜ 风速 {fc['wind_now']} km/h")
-        lines.append(f"> ・今日：{w_day} ｜ 气温 {fc['tmin']}~{fc['tmax']}℃ ｜ 最大风速 {fc['wind_max']} km/h")
-    else:
-        lines.append("> 澄迈天气预报：获取失败")
-    for e in errors:
-        lines.append(f"> 数据获取异常：{e}")
-
-    lines.append("> ——")
-    lines.append("> 数据来源：中国气象局·中央气象台（预警）／ 中央气象台台风网 nmc（路径）")
+        lines.append(f"> 天气：{w_now} {fc['temp_now']:.0f}℃ ｜ 今日 "
+                     f"{fc['tmin']:.0f}~{fc['tmax']:.0f}℃ {w_day} ｜ 风 {fc['wind_max']:.0f}km/h")
+    if errors:
+        lines.append(f"> 数据获取异常：{'；'.join(errors)}")
 
     md = "\n".join(lines)
     parts = split_md(md)      # 预警多时单片会超过企业微信上限被整体丢弃，必须分片
