@@ -57,3 +57,5 @@
 {"ts": "2026-10-06 01:31:43", "kind": "alert", "msgtype": "markdown+text", "type": "暴雨", "level": "橙色", "region": "海口", "is_sea": false, "issuer": "海口市气象台", "effective": "2026/10/05 23:15", "headline": "海口市气象台发布暴雨橙色预警信号", "tier": "orange", "repeat": true, "batch": 1, "ok": true}
 {"ts": "2026-10-06 04:21:58", "kind": "alert", "msgtype": "markdown+text", "type": "暴雨", "level": "橙色", "region": "海口", "is_sea": false, "issuer": "海口市气象台", "effective": "2026/10/05 23:15", "headline": "海口市气象台发布暴雨橙色预警信号", "tier": "orange", "repeat": true, "batch": 1, "ok": true}
 {"ts": "2026-10-06 04:52:02", "kind": "lifted", "msgtype": "markdown", "level": "橙色", "type": "暴雨", "region": null, "headline": "海口市气象台发布暴雨橙色预警信号", "ok": true}
+{"ts": "2026-10-06 08:57:25", "kind": "daily", "msgtype": "markdown", "active": 3, "land": 3, "sea": 0, "typhoon": 0, "parts": 1, "ok": true}
+{"ts": "2026-10-06 08:57:33", "kind": "daily_image", "msgtype": "image", "cn": "小熊\n"}
