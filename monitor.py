@@ -488,13 +488,54 @@ def load_state():
         return {}
 
 
+def sync_from_remote(state):
+    """把工作区与内存里的 state 同步到远端 main 的最新版本（并发保护）。
+
+    背景：GitHub Actions 的 checkout 默认签出「触发本次 run 时记录的 SHA」而不是最新 main。
+    当两个 run 因排队/重试而重叠执行时（实测 2026-10-06 04:52：一个 run 排队等 runner
+    等了 10 分钟，与下一个 run 相隔 38 秒先后启动），两者会读到完全相同的旧 state.json，
+    于是都判定"某条预警消失"并各推一条解除通知 —— 群里 2 条、push_log 只有 1 条
+    （后一条的 commit 被 reject，记录没入库）。
+
+    对策：在跑业务逻辑之前先把工作区硬同步到 origin/main。后启动的进程因此能看到前一个
+    进程刚提交的状态（该预警的键已被删除），从而跳过重复的解除通知。
+    同步失败（网络/仓库异常）时静默沿用本地 state，不阻断本轮监控。
+    """
+    try:
+        r1 = subprocess.run(["git", "fetch", "origin", "main", "--depth=1"],
+                            check=False, timeout=60).returncode
+        if r1 != 0:
+            log("远端同步跳过：git fetch 失败")
+            return False
+        # 此刻工作区是刚 checkout 的干净状态（只装了依赖），reset 不会丢失任何本地改动
+        r2 = subprocess.run(["git", "reset", "--hard", "origin/main"],
+                            check=False, timeout=60).returncode
+        if r2 != 0:
+            log("远端同步跳过：git reset 失败")
+            return False
+        remote = load_state()
+        if isinstance(remote, dict) and remote:
+            state.clear()
+            state.update(remote)
+            log("已同步远端最新 state（并发保护）")
+            return True
+        return False
+    except Exception as e:
+        log("远端同步异常（沿用本地 state）:", repr(e))
+        return False
+
+
 def save_state(state):
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
 
 
 def commit_state():
-    """把 state.json 与推送日志/归档一起提交回仓库（持久化去重状态 + 留存溯源记录）。"""
+    """把 state.json 与推送日志/归档一起提交回仓库（持久化去重状态 + 留存溯源记录）。
+
+    返回 True/False。失败必须如实报错：之前无论 push 是否成功都打印"已提交"，
+    掩盖了「状态没落盘 -> 下一轮重复推送」这个真正的故障，排查时极具误导性。
+    """
     try:
         subprocess.run(["git", "add", STATE_FILE], check=False)
         if os.path.isdir("data"):
@@ -503,15 +544,20 @@ def commit_state():
             subprocess.run(["git", "config", "user.name", "github-actions[bot]"], check=False)
             subprocess.run(["git", "config", "user.email", "github-actions[bot]@users.noreply.github.com"], check=False)
             subprocess.run(["git", "commit", "-m", "chore: update warning state & push log"], check=False)
-            r = subprocess.run(["git", "push"], check=False).returncode
-            if r != 0:
-                # 轮询任务与每日报告可能同一分钟并发触发，先 rebase 再重推一次
-                log("push 失败，尝试 pull --rebase 后重试")
+            # 最多 3 次：每轮开始时已同步过远端，但推送期间仍可能有另一个 run 抢先提交
+            for i in range(3):
                 subprocess.run(["git", "pull", "--rebase", "--autostash"], check=False)
-                subprocess.run(["git", "push"], check=False)
-            log("state 与推送日志已提交")
+                if subprocess.run(["git", "push"], check=False).returncode == 0:
+                    log("state 与推送日志已提交")
+                    return True
+                log(f"push 被拒，rebase 后重试 {i + 1}/3")
+                time.sleep(3)
+            log("state 提交失败：连续 3 次 push 被拒，本轮状态未落盘（下轮可能重复推送）")
+            return False
+        return True
     except Exception as e:
         log("commit_state error:", e)
+        return False
 
 
 def record_push(kind, alert=None, msgtype="", extra=None):
@@ -1519,6 +1565,7 @@ def check_imminent(state):
 def mode_poll():
     now = time.time()
     state = load_state()
+    sync_from_remote(state)   # 先对齐远端最新状态，避免与并发 run 重复推送"解除"
     changed = False
     pushed = 0
     try:
@@ -1676,7 +1723,8 @@ def mode_poll():
     try:
         if changed:
             save_state(state)
-            commit_state()
+            if not commit_state():
+                log("警告：本轮状态未落盘，下一轮可能重复推送解除通知")
     except Exception as e:
         log("state 保存失败:", repr(e))
     log(f"本轮：活跃预警 {len(active)} 条，新推送/提醒 {pushed} 条，"
@@ -1732,6 +1780,7 @@ DAILY_CATCHUP_AFTER = (9, 25)   # 09:25 之后才允许补发，给正常的 09:
 
 def mode_daily():
     state = load_state()
+    sync_from_remote(state)   # 同上：日报也靠 state 去重，并发时必须先对齐远端
     today = datetime.now(BEIJING).strftime("%Y-%m-%d")
     if state.get("last_daily_report_date") == today:
         log("今日每日报告已推送，跳过重复推送")
