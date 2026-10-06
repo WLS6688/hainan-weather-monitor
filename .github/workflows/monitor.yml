@@ -5,8 +5,10 @@ on:
     # 全部避开整点：GitHub Actions 在「每小时整点」负载最高，schedule 事件会被延迟数小时
     # 甚至直接丢弃（实测本仓库曾出现单次延迟 5 小时、以及连续 2 小时零执行的情况）。
     - cron: "3,13,23,33,43,53 * * * *"  # 每 10 分钟轮询（跳过整点，避开负载高峰）
-    - cron: "7 1 * * *"                 # 每日报告主触发：北京时间 09:07（UTC 01:07）
-    - cron: "7 2 * * *"                 # 每日报告冗余触发：北京时间 10:07，靠 last_daily_report_date 去重，不会重复推
+    # 每日报告改到上班前：北京时间 07:30 发，出门前就能看到当天预警和天气。
+    # 冗余触发 08:30 兜一次；再不行还有 DAILY_CATCHUP_AFTER 之后的每轮 poll 补发。
+    - cron: "30 23 * * *"               # 主触发：北京时间 07:30（UTC 23:30）
+    - cron: "30 0 * * *"                # 冗余触发：北京时间 08:30（UTC 00:30），靠 last_daily_report_date 去重
   workflow_dispatch:                    # 手动触发 / 供外部定时服务调用（备选方案入口）
     inputs:
       mode:
@@ -66,7 +68,7 @@ jobs:
         run: |
           sched="${{ github.event.schedule }}"
           input_mode="${{ github.event.inputs.mode }}"
-          if [ "$input_mode" = "daily" ] || [ "$sched" = "7 1 * * *" ] || [ "$sched" = "7 2 * * *" ]; then
+          if [ "$input_mode" = "daily" ] || [ "$sched" = "30 23 * * *" ] || [ "$sched" = "30 0 * * *" ]; then
             python3 monitor.py --mode daily
           else
             python3 monitor.py --mode poll
