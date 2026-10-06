@@ -1130,7 +1130,9 @@ def fmt_alert_block(a, repeat=False):
     src = a["issuer"] or a["region"]
     label = (f"{a.get('type') or ''}{a.get('level') or ''}预警"
              if (a.get("type") or a.get("level")) else "气象预警")
-    lines = [f"> **{src} · {label}**"]
+    # 老城高亮：文案点名老城时在标题后打标，扫一眼就知道这条跟自己有关，不用读正文找地名
+    focus = "　📍 涉及老城" if town_scope(a) == "focus" else ""
+    lines = [f"> **{src} · {label}**{focus}"]
     core = clip_core(alert_core(a))
     if core:
         lines.append(f"> {core}")
