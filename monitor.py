@@ -1849,11 +1849,23 @@ def brief_extra(a):
         if t:
             core = core.replace(t, "")
     core = re.sub(r"[（(]\s*[）)]", "", core).strip("：:，, ")
-    unit = iss or a.get("region") or ""
-    if len(core) >= 10:
-        tail = core if len(core) <= 26 else core[:26] + "…"
-        return f" · {unit} ｜ {tail}" if unit else f" ｜ {tail}"
-    return f" · {unit}" if unit else ""
+    if len(core) >= 8:
+        return " ｜ " + (core if len(core) <= 20 else core[:20] + "…")
+    return ""
+
+
+# 等级色块：让日报一眼看出严重程度（红/橙是需要立刻处理的等级）
+LEVEL_DOT = {"红色": "🔴", "橙色": "🟠", "黄色": "🟡", "蓝色": "🔵", "白色": "⚪"}
+
+
+def short_eff(s):
+    """把 '2026/10/03 17:46' 压成 '10-03 17:46'，日报里只关心几号几点发的。"""
+    try:
+        d, t = (s or "").split(" ")
+        _, m, dd = d.split("/")
+        return f"{m}-{dd} {t}"
+    except Exception:
+        return (s or "").strip()
 
 
 def mode_daily():
@@ -1884,32 +1896,51 @@ def mode_daily():
     # 海上预警专区、数据来源落款、「未实时推送·仅日报」标注；天气由 2 行压成 1 行；
     # 台风/扰动只保留有实质内容的提示，且最多占 1 行。
     head = f"> 【澄迈预警日报】{bj.strftime('%m-%d %H:%M')}"
+    n = len(land)
+    lines = [f"{head} ｜ {'生效 %d 条' % n if n else '今日无生效预警'}", ">"]
+
+    # 一、陆地预警：等级用色块，附发布单位与发布时间（能一眼看出预警新不新）
+    lines.append("> ⚠️ 陆地预警")
     if land:
-        lines = [f"{head} ｜ 生效 {len(land)} 条"]
         for lvl in ["红色", "橙色", "黄色", "蓝色"]:
             for a in land:
                 if a["level"] != lvl:
                     continue
-                lines.append(f"> ・[{lv(a)}]{a['type']}{brief_extra(a)}")
+                unit = a.get("issuer") or a.get("region") or ""
+                eff = short_eff(a.get("effective"))
+                row = f"> ・{LEVEL_DOT.get(lvl, '⚪')} {a['type']}"
+                if unit:
+                    row += f" · {unit}"
+                if eff:
+                    row += f" · {eff}"
+                lines.append(row + brief_extra(a))
     else:
-        lines = [f"{head} ｜ 今日无生效预警"]
+        lines.append("> ・无")   # 标题行已写明"今日无生效预警"，这里不再重复
 
-    # 台风趋势 / 热带扰动：有实质内容才占 1 行，且两者最多只显示一个
+    # 二、台风趋势：始终占 1 行。有影响就写实情（哪天、哪个方向），
+    # 没影响也明说"无"，不让人猜——但不出现原来那种两行的啰嗦说明。
+    ty_line = None
     for hint in (typhoon_outlook(), disturbance_outlook()):
         real = [h for h in (hint or []) if not any(k in h for k in EMPTY_HINT_WORDS)]
         if real:
-            lines.append(real[0].rstrip())
+            ty_line = re.sub(r"^(台风趋势提示|热带扰动监测|热带扰动提示)\s*[：:]?\s*",
+                             "", real[0].lstrip("> ").strip())
             break
+    lines.append(">")
+    lines.append("> 🌀 台风趋势")
+    lines.append(f"> ・{ty_line or '未来数日无预报路径直接影响海南的台风'}")
 
-    # 澄迈今日天气预报（Open-Meteo，免 key）压成 1 行
+    # 三、澄迈今日天气（Open-Meteo，免 key）
     fc = fetch_forecast()
     if fc and fc.get("temp_now") is not None:
         w_now = WMO_WEATHER.get(fc.get("code_now"), "未知")
         w_day = WMO_WEATHER.get(fc.get("code_day"), "未知")
-        lines.append(f"> 天气：{w_now} {fc['temp_now']:.0f}℃ ｜ 今日 "
+        lines.append(">")
+        lines.append("> 🌤 澄迈今日")
+        lines.append(f"> 现在 {w_now} {fc['temp_now']:.0f}℃ ｜ 今日 "
                      f"{fc['tmin']:.0f}~{fc['tmax']:.0f}℃ {w_day} ｜ 风 {fc['wind_max']:.0f}km/h")
     if errors:
-        lines.append(f"> 数据获取异常：{'；'.join(errors)}")
+        lines.append(f"> ⚠️ 数据获取异常：{'；'.join(errors)}")
 
     md = "\n".join(lines)
     parts = split_md(md)      # 预警多时单片会超过企业微信上限被整体丢弃，必须分片
