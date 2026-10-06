@@ -1153,7 +1153,10 @@ def impact_until(text, base=None):
         return None
     base = base or datetime.now(BEIJING)
     t = base + (timedelta(hours=n) if m.group(2) == "小时" else timedelta(days=n))
-    return t.strftime("%H:%M") if m.group(2) == "小时" else t.strftime("%m-%d %H:%M")
+    # 跨天必须带上日期：只写"影响至 11:08"会被误读成一小时后（实际是次日 11:08）
+    if t.date() != base.date():
+        return t.strftime("%m-%d %H:%M")
+    return t.strftime("%H:%M")
 
 
 def fmt_alert_block(a, repeat=False):
@@ -1169,12 +1172,15 @@ def fmt_alert_block(a, repeat=False):
              if (a.get("type") or a.get("level")) else "气象预警")
     # 老城高亮：文案点名老城时在标题后打标，扫一眼就知道这条跟自己有关，不用读正文找地名
     focus = "　📍 涉及老城" if town_scope(a) == "focus" else ""
-    lines = [f"> **{src} · {label}**{focus}"]
+    # 沿海类（风暴潮/海浪）单独打标：它们虽按陆地流程走，但影响的是海岸带，
+    # 不加标记会被误当成普通陆地预警。
+    coast = "　🌊 沿海" if (a.get("type") or "") in COASTAL_TYPES else ""
+    lines = [f"> **{src} · {label}**{focus}{coast}"]
     core = clip_core(alert_core(a))
     if core:
-        # 不涉及老城的预警：镇名长清单压成「前两个……最后一个」，其余内容原样
-        if town_scope(a) != "focus":
-            core = compress_town_list(core)
+        # 镇名长清单压成「前两个……最后一个」，其余内容（雨量/时段/建议）原样保留。
+        # 涉及老城的也一样压缩——真要细看可以点详情链接。
+        core = compress_town_list(core)
         lines.append(f"> {core}")
     until = impact_until(a.get("description") or "")
     until_txt = f" ｜ 预计影响至 {until}" if until else ""
@@ -2061,6 +2067,8 @@ def mode_daily():
                 if eff:
                     row += f" · {eff}"
                 row += brief_extra(a)
+                if (a.get("type") or "") in COASTAL_TYPES:
+                    row += " ｜ 沿海（风暴潮/海浪，影响海岸带）"
                 if town_scope(a) == "other":
                     row += " ｜ 未点名老城（不即时推送）"
                 lines.append(row)
