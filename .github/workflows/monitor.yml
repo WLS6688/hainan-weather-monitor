@@ -19,6 +19,7 @@ on:
 
 permissions:
   contents: write            # 用于把 state.json 提交回仓库（持久化去重）
+  actions: read              # 用于并发自检：查询是否已有另一个 run 正在运行
 
 # 同一时刻只允许一个 run 推进，避免并发写 state.json 造成状态互相覆盖
 concurrency:
@@ -60,6 +61,8 @@ jobs:
       - name: 运行监控
         env:
           WECHAT_WEBHOOK: ${{ secrets.WECHAT_WEBHOOK }}
+          # 并发自检用：GITHUB_RUN_ID / GITHUB_REPOSITORY 由 Actions 自动注入，无需声明
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           sched="${{ github.event.schedule }}"
           input_mode="${{ github.event.inputs.mode }}"
