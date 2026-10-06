@@ -1101,6 +1101,33 @@ def alert_core(a):
     return ""
 
 
+# 镇名枚举的压缩参数：官方正文常把十几个镇逐一列出，对不在那片区域的人全是噪音。
+# 少于 TOWN_LIST_MIN 个镇名的不动（一两个镇名本身就是关键信息）；
+# 达到阈值时只保留前 TOWN_LIST_KEEP 个 + "……" + 最后一个，雨量/建议等正文原样保留。
+TOWN_LIST_MIN = 4
+TOWN_LIST_KEEP = 2
+
+
+def compress_town_list(text):
+    """压缩正文里的镇名长枚举：「灵山镇、东山镇、…、演丰镇」→「灵山镇、东山镇……演丰镇」。
+
+    只对与老城无关的预警使用（涉及老城的正文一字不动）；枚举之外的
+    降雨量、时段、防御建议等内容全部保留，不算截断。
+    """
+    if not text:
+        return text
+    pat = re.compile(r"([\u4e00-\u9fa5]{1,4}镇(?:、[\u4e00-\u9fa5]{1,4}镇){%d,})"
+                     % (TOWN_LIST_MIN - 1))
+
+    def _short(mo):
+        names = mo.group(1).split("、")
+        if len(names) <= TOWN_LIST_KEEP + 2:
+            return mo.group(1)
+        return "、".join(names[:TOWN_LIST_KEEP]) + "……" + names[-1]
+
+    return pat.sub(_short, text)
+
+
 def impact_until(text, base=None):
     """从正文的"未来N小时 / 未来N天"推算影响结束时刻。
 
@@ -1135,6 +1162,9 @@ def fmt_alert_block(a, repeat=False):
     lines = [f"> **{src} · {label}**{focus}"]
     core = clip_core(alert_core(a))
     if core:
+        # 不涉及老城的预警：镇名长清单压成「前两个……最后一个」，其余内容原样
+        if town_scope(a) != "focus":
+            core = compress_town_list(core)
         lines.append(f"> {core}")
     until = impact_until(a.get("description") or "")
     until_txt = f" ｜ 预计影响至 {until}" if until else ""
