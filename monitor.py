@@ -293,7 +293,8 @@ def fetch_forecast(lat=CHENGMAI_LAT, lon=CHENGMAI_LON, tries=3):
     url = ("https://api.open-meteo.com/v1/forecast"
            f"?latitude={lat}&longitude={lon}"
            "&current=temperature_2m,weather_code,wind_speed_10m,relative_humidity_2m"
-           "&daily=weather_code,temperature_2m_max,temperature_2m_min,wind_speed_10m_max"
+           "&daily=weather_code,temperature_2m_max,temperature_2m_min,wind_speed_10m_max,"
+           "precipitation_probability_max"
            "&timezone=Asia%2FShanghai&forecast_days=1&wind_speed_unit=kmh")
     for i in range(tries):
         try:
@@ -311,6 +312,7 @@ def fetch_forecast(lat=CHENGMAI_LAT, lon=CHENGMAI_LON, tries=3):
                 "tmax": (daily.get("temperature_2m_max") or [None])[0],
                 "tmin": (daily.get("temperature_2m_min") or [None])[0],
                 "wind_max": (daily.get("wind_speed_10m_max") or [None])[0],
+                "pop_max": (daily.get("precipitation_probability_max") or [None])[0],
             }
         except Exception as e:
             log(f"forecast error: {e}")
@@ -1646,6 +1648,7 @@ def mode_poll():
                 "sig": content_sig(a),
                 "last_push": 0.0,            # 推送成功后统一回填
                 "pushed": False,
+                "first_seen": now,           # 首次发现时刻，解除时用来算持续时长
             }
             if will_push:
                 pending.append((a, False, a["key"]))
@@ -1714,7 +1717,10 @@ def mode_poll():
         if old.get("is_sea"):
             continue
         if old.get("pushed"):
-            ok = wechat_markdown(f"> **预警解除**：{old.get('headline', '')}")
+            began = old.get("first_seen") or old.get("last_push") or 0
+            dur = fmt_dur(max(0.0, now - alert_begin_epoch(old, began))) if began else ""
+            ok = wechat_markdown(f"> **预警解除**：{old.get('headline', '')}"
+                                 + (f"\n> 本次持续 {dur}" if dur else ""))
             record_push("lifted", msgtype="markdown",
                         extra={"level": old.get("level"), "type": old.get("type"),
                                "region": old.get("region"), "headline": old.get("headline", ""),
@@ -1815,7 +1821,39 @@ def pick_primary_typhoon():
         if score > best_score:
             best_score, best = score, det
             best["cn"] = t["cn"]
+            best["relevance"] = score   # 2=当前已在海南框内 / 1=预报路径进框 / 0=与海南无关
     return best
+
+
+def fmt_dur(sec):
+    """把秒数说成人话：'3 小时 20 分' / '2 天 4 小时' / '45 分钟'。"""
+    try:
+        sec = float(sec)
+    except Exception:
+        return ""
+    if sec < 60:
+        return "不足 1 分钟"
+    m = int(sec // 60)
+    if m < 60:
+        return f"{m} 分钟"
+    h, m = divmod(m, 60)
+    if h < 24:
+        return f"{h} 小时 {m} 分" if m else f"{h} 小时"
+    d, h = divmod(h, 24)
+    return f"{d} 天 {h} 小时" if h else f"{d} 天"
+
+
+def alert_begin_epoch(old, fallback):
+    """预警起始时刻：优先用官方发布时间，解析失败才回退到系统首次发现的时间。"""
+    s = (old.get("effective") or "").strip()
+    try:
+        dt = datetime.strptime(s, "%Y/%m/%d %H:%M").replace(tzinfo=BEIJING)
+        ts = dt.timestamp()
+        if 0 < fallback - ts < 30 * 86400:   # 最多追溯 30 天，防止脏数据算出错时长
+            return ts
+    except Exception:
+        pass
+    return fallback
 
 
 # 每日报告「迟到补发」起始时刻（北京时间 hour, minute）。
@@ -1937,8 +1975,12 @@ def mode_daily():
         w_day = WMO_WEATHER.get(fc.get("code_day"), "未知")
         lines.append(">")
         lines.append("> 🌤 澄迈今日")
+        pop = fc.get("pop_max")
+        pop_txt = (f" ｜ 降水概率 {int(round(pop))}%"
+                   if isinstance(pop, (int, float)) else "")
         lines.append(f"> 现在 {w_now} {fc['temp_now']:.0f}℃ ｜ 今日 "
-                     f"{fc['tmin']:.0f}~{fc['tmax']:.0f}℃ {w_day} ｜ 风 {fc['wind_max']:.0f}km/h")
+                     f"{fc['tmin']:.0f}~{fc['tmax']:.0f}℃ {w_day} ｜ "
+                     f"风 {fc['wind_max']:.0f}km/h{pop_txt}")
     if errors:
         lines.append(f"> ⚠️ 数据获取异常：{'；'.join(errors)}")
 
@@ -1959,12 +2001,17 @@ def mode_daily():
         log("每日报告推送失败，不标记今日已完成，等待下一轮补发")
         return
 
-    # 附台风路径图（取对海南影响最直接的活跃台风；方案 A 用 image 消息呈现）
+    # 附台风路径图：只在对海南有影响时才附图（relevance >= 1）。
+    # 旧逻辑是"只要有编号台风就发图"，于是远在西北太平洋、跟海南毫无关系的台风
+    # 每天也占一条图片消息（推送日志里 9-27~10-05 每天都有一条 daily_image）。
     det_primary = pick_primary_typhoon()
-    if det_primary:
-        img = render_track_image(det_primary["cur"], det_primary["forecast"],
-                                 det_primary.get("track"),
-                                 title=f"台风“{det_primary.get('cn', '')}”路径预报")
+    if det_primary and det_primary.get("relevance", 0) >= 1:
+        cur = det_primary["cur"]
+        km = haversine(cur["lat"], cur["lon"], CHENGMAI_LAT, CHENGMAI_LON)
+        title = (f"台风“{det_primary.get('cn', '')}”路径预报"
+                 f" ｜ 距澄迈约 {int(round(km))} 公里")
+        img = render_track_image(cur, det_primary["forecast"],
+                                 det_primary.get("track"), title=title)
         if img:
             wechat_image(img)
             record_push("daily_image", msgtype="image",
