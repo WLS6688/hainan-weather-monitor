@@ -63,6 +63,11 @@ jobs:
       - name: 运行监控
         env:
           WECHAT_WEBHOOK: ${{ secrets.WECHAT_WEBHOOK }}
+          # 夜间值班点名（可选）：夜间静默时段本该 @all 的事件改为只点这几个人的名。
+          # 仓库是 public，标识信息一律走 secret，不要写进代码。
+          # 不配则夜间完全静默（红色预警与台风已进入仍无视静默 @all）。
+          NIGHT_DUTY_USERS: ${{ secrets.NIGHT_DUTY_USERS }}
+          NIGHT_DUTY_MOBILES: ${{ secrets.NIGHT_DUTY_MOBILES }}
           # 并发自检用：GITHUB_RUN_ID / GITHUB_REPOSITORY 由 Actions 自动注入，无需声明
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
