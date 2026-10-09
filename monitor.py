@@ -162,6 +162,32 @@ PUSH_DEDUP_SECONDS = 600
 IMMINENT_ETA_ADVANCE = 6 * 3600   # 预计进入时间提前 ≥6 小时 -> 补推一条升级提示
 # 台风路径图：是否生成并推送路径图（依赖 matplotlib，运行时按需自装；装不上则自动降级为纯文字）
 ENABLE_TRACK_IMAGE = True
+
+# ---------- 全员提醒（@all）强度分级与限流 ----------
+# 背景：企业微信只有 text 消息支持 @all；原实现里红/橙预警一律 @all，
+# 而台风通道全程只发 markdown（无法 @），于是"台风逼近"这种最该叫醒人的场景反而不响；
+# 同时红/橙持续预警每 2 小时 @一次，台风持续 48 小时就是 24 次全员 @，会让人麻木。
+# 对策：把"是否发内容"与"是否打断全员"解耦，分成三级 + 三个限流旋钮。
+#   L3 立即全员：红色首现/升级、台风已进入影响范围、台风强度升级或进入时间提前
+#                —— 属"新情况"，无视冷却、无视夜间静默、不受每日熔断约束；
+#   L2 缓一缓再全员：橙色首现/变动、台风逼近（≤48h）、红色持续提醒
+#                —— 受冷却、夜间静默、每日熔断约束；
+#   L1 静默卡片：橙色持续提醒、降级、解除、日报、扰动 —— 只发卡片，不 @ 任何人。
+ATALL_COOLDOWN = 3600          # L2 同级 @all 冷却（秒）：60 分钟内不重复叫全员
+ATALL_DAY_LIMIT = 8            # L2 每日 @all 熔断上限（次）；L3 不受此限
+REPUSH_ATALL_MIN = 12 * 3600   # 同一条预警的持续提醒，@all 间隔不得短于 12 小时
+# 夜间静默（北京时间）：这段时间只压 @all，不压消息本身。
+# 理由：凌晨被叫起来看"明天有暴雨"既不能加固也不能巡查，只会消耗对 @all 的敏感度；
+# 而红色预警与台风已进入意味着可能要连夜转移/值班，必须放行。
+QUIET_HOURS = (23, 0, 6, 30)   # 23:00 - 次日 06:30
+# 夜间提醒点名：名单非空时，夜间本该 @all 的 L2 事件改为只点这几个人的名。
+# 用企业微信 userid（通讯录「账号」栏，形如 ZhangSan），不要用昵称/姓名。
+# 名单从 GitHub Actions secret 注入 —— 仓库是 public，不要把标识信息写进代码。
+NIGHT_DUTY_USERS = [u.strip() for u in os.environ.get("NIGHT_DUTY_USERS", "").split(",")
+                    if u.strip()]
+# 手机号兜底（可选）：仅当上面 userid 名单为空时生效。
+NIGHT_DUTY_MOBILES = [m.strip() for m in os.environ.get("NIGHT_DUTY_MOBILES", "").split(",")
+                      if m.strip()]
 # 通用防御指引基准（按等级）
 LEVEL_ADVICE = {
     "红色": "立即停止户外活动，人员留在安全场所，切断危险电源，远离危房、边坡与河道。",
@@ -787,6 +813,105 @@ def push_tier(a):
     return None  # 蓝/黄/海上：仅进入每日报告，不弹群消息
 
 
+def quiet_hours_now():
+    """当前北京时间是否处于夜间静默段（23:00-06:30）。"""
+    s_h, s_m, e_h, e_m = QUIET_HOURS
+    now = datetime.now(BEIJING)
+    cur = now.hour * 60 + now.minute
+    start, end = s_h * 60 + s_m, e_h * 60 + e_m
+    return cur >= start or cur < end      # 跨零点：两段取或
+
+
+def alert_notify_level(items):
+    """一批预警的提醒强度：'L3' 立即全员 / 'L2' 受约束全员 / 'L1' 静默卡片。
+
+    关键区分：红色"新出现/升级"是必须立刻知道的新情况（L3）；
+    而"红色持续提醒"只是旧事重提，降为 L2；橙色持续提醒则完全不 @（L1），
+    否则一场台风下来 24 次 @all 会把全员提醒的价值稀释成噪音。
+    """
+    has_red = any(a["level"] == "红色" for a, _ in items)
+    any_repeat = any(r for _, r in items)
+    if has_red and not any_repeat:
+        return "L3"
+    if has_red:
+        return "L2"          # 红色持续提醒
+    if any_repeat:
+        return "L1"          # 橙色持续提醒：只发卡片
+    return "L2"              # 橙色首现 / 内容变动
+
+
+def imminent_notify_level(remain, escalated):
+    """台风通道的提醒强度。
+
+    强度升级与"预计进入时间提前"等同于预警升级，按 L3 处理；
+    台风已进入影响范围（remain ≤ 0）也是 L3；
+    逼近（≤48h）是 L2；远距离趋向（>48h）只是预告，L1 不打扰。
+    """
+    if escalated in ("强度升级", "预计时间提前"):
+        return "L3"
+    if remain < 0:
+        return "L3"
+    if remain <= 48 * 3600:
+        return "L2"
+    return "L1"
+
+
+def at_all_allowed(state, level, key=None):
+    """本次是否允许 @all；返回 (是否放行, 未放行原因)。就地更新 state['_atall']。
+
+    L3 一律放行（真紧急情况不该被限流规则挡住）；L2 受冷却 / 单条预算 / 夜间静默 /
+    每日熔断约束；L1 永不 @。state 为 None 时（如手动调用）按放行处理。
+    """
+    if level == "L1":
+        return False, "静默级"
+    if state is None:
+        return True, ""
+    now = time.time()
+    rec = state.setdefault("_atall", {"last": 0.0, "date": "", "count": 0, "per_key": {}})
+    today = datetime.now(BEIJING).strftime("%Y-%m-%d")
+    if rec.get("date") != today:
+        rec["date"] = today
+        rec["count"] = 0
+        rec["per_key"] = {}
+    if level == "L3":
+        rec["last"] = now
+        rec["count"] = rec.get("count", 0) + 1
+        if key:
+            rec.setdefault("per_key", {})[key] = now
+        return True, ""
+    if rec.get("count", 0) >= ATALL_DAY_LIMIT:
+        return False, "今日全员提醒次数已达上限"
+    if quiet_hours_now():
+        return False, "夜间静默"
+    if now - (rec.get("last") or 0.0) < ATALL_COOLDOWN:
+        return False, "距上次全员提醒不足 60 分钟"
+    if key and now - (rec.get("per_key", {}).get(key) or 0.0) < REPUSH_ATALL_MIN:
+        return False, "同一预警 12 小时内已提醒过"
+    rec["last"] = now
+    rec["count"] = rec.get("count", 0) + 1
+    rec.setdefault("per_key", {})[key if key else "_"] = now
+    return True, ""
+
+
+def mention_plan(state, level, key=None):
+    """返回 (是否允许 @all, 点名 userid 列表, 点名手机号列表, 未 @all 的原因)。
+
+    夜间且 L2 未获准 @all 时，若配了值班名单则改为只点这几个人的名 ——
+    "要么全叫、要么全不叫"之外，给夜间留一个中间档。
+    """
+    allowed, reason = at_all_allowed(state, level, key)
+    if allowed:
+        return True, None, None, ""
+    if level == "L1":
+        return False, None, None, reason
+    if quiet_hours_now():
+        if NIGHT_DUTY_USERS:
+            return False, NIGHT_DUTY_USERS, None, "夜间静默·已改为点名值班人"
+        if NIGHT_DUTY_MOBILES:
+            return False, None, NIGHT_DUTY_MOBILES, "夜间静默·已改为点名值班人"
+    return False, None, None, reason
+
+
 # 企业微信 markdown 单条内容上限 4096 字节，预留安全余量
 WECOM_MD_MAX_BYTES = 3800
 # 企业微信 text 单条内容上限约 2048 字节
@@ -857,17 +982,20 @@ def split_md(text, limit=WECOM_MD_MAX_BYTES):
     return out
 
 
-def push_alerts(items):
+def push_alerts(items, state=None):
     """把一轮内需要推送的预警「合并」成最多 2 条消息发出。
 
     items: [(alert, repeat_flag), ...]，已通过 should_push / push_tier 筛选。
+    state: 本轮状态字典，用于 @all 的冷却 / 每日熔断 / 单条预算（None 时按放行处理）。
     返回成功推送的预警条数（按预警计数，便于日志统计）。
 
     合并策略（保留原有分级语义，同时避免一次轮询刷屏）：
-      - 含红色：先发 text（@all，逐条列出等级+标题，红色附核心与防御指引），
+      - 含红色：先发 text（逐条列出等级+标题，红色附核心与防御指引），
                 再发一张合并 markdown 详情卡（text 保证全员必达）；
-      - 仅橙色：先发合并 markdown 详情卡，再发 text（@all 一行提醒，用于触发提醒）；
+      - 仅橙色：先发合并 markdown 详情卡，再发 text 一行提醒；
     多条预警共用同一条消息；超出字节上限时自动分片。
+    @all 不再无条件附加：由 alert_notify_level() 定级、at_all_allowed() 把关，
+    橙色持续提醒静默（只发卡片），夜间改为点名值班人（若配了名单）。
     每条预警仍单独写入推送日志，保持可溯源。
     """
     items = [(a, r) for a, r in items if a]
@@ -897,7 +1025,16 @@ def push_alerts(items):
     link = (f"> [实时台风路径·点击查看]({TYPHOON_TRACK_URL})"
             if any(a.get("type") == "台风" for a in alerts)
             else f"> [预警详情·点击查看]({WARN_DETAIL_URL})")
+    # ---- 提醒强度定级：决定这次到底要不要 @ 全员 ----
+    level = alert_notify_level(items)
+    at_key = alerts[0].get("key") if n == 1 else None
+    use_at_all, duty_users, duty_mobiles, reason = mention_plan(state, level, at_key)
     md = "\n\n".join([head] + blocks + adv_lines + [link, "> 数据来源：中国气象局·中央气象台"])
+    if level != "L1" and not use_at_all:
+        # 卡片尾部点一句：否则"安静"会被误读成"监控没发出来"
+        note = ("夜间静默，已改为点名值班人" if (duty_users or duty_mobiles)
+                else f"{reason}，本次未 @ 全体")
+        md += f"\n\n> （{note}）"
 
     # ---- text 内容（企业微信仅 text 消息支持 @all，上限约 2048 字节）----
     title_lines = [f"【{a['level']}】{a['issuer'] or a['region']} · {a.get('type') or ''}预警"
@@ -919,15 +1056,21 @@ def push_alerts(items):
         text = "\n".join([hint] + title_lines + ["（详细内容见下方预警卡，请及时防御）"])
 
     # ---- 发送：红色优先 text（必达），橙色优先详情卡 ----
+    # @all 不再无条件附加：L1 只发卡片；L2 受冷却/夜间/熔断约束，夜间有值班名单则改点名。
     ok_m = ok_t = False
-    if has_red:
-        ok_t = wechat_text(text, mention_list=["@all"])
+    mention = ["@all"] if use_at_all else duty_users
+    if level == "L1":
+        # 静默级只发卡片：text 消息的全部价值就在于它能 @ 人，不 @ 就没必要占一条消息
+        for chunk in split_md(md):
+            ok_m = wechat_markdown(chunk) or ok_m
+    elif has_red:
+        ok_t = wechat_text(text, mention_list=mention, mention_mobile=duty_mobiles)
         for chunk in split_md(md):
             ok_m = wechat_markdown(chunk) or ok_m
     else:
         for chunk in split_md(md):
             ok_m = wechat_markdown(chunk) or ok_m
-        ok_t = wechat_text(text, mention_list=["@all"])
+        ok_t = wechat_text(text, mention_list=mention, mention_mobile=duty_mobiles)
     ok = bool(ok_m or ok_t)
 
     # 台风类预警顺带发一张路径图——沿用日报那把锁：只有当前位置或预报路径进入
@@ -951,9 +1094,12 @@ def push_alerts(items):
     for a, r in items:
         record_push("alert", a, msgtype="markdown+text",
                     extra={"tier": "red" if a["level"] == "红色" else "orange",
-                           "repeat": r, "batch": n, "ok": ok})
+                           "repeat": r, "batch": n, "ok": ok,
+                           "notify_level": level, "at_all": bool(use_at_all)})
     if n > 1:
-        log(f"合并推送 {n} 条预警（1 条详情卡 + 1 条 @all 提醒）")
+        log(f"合并推送 {n} 条预警（{level}"
+            f"{'·@all' if use_at_all else '·不@'}"
+            f"{'·点名值班人' if (duty_users or duty_mobiles) else ''}）")
     return n if ok else 0
 
 
@@ -1700,6 +1846,31 @@ def check_imminent(state):
             else:
                 continue   # 无显著变化，不重复打扰
             msg, title = imminent_message(t, det, box_fc, eta, remain, escalated)
+
+            # ---- 全员提醒：台风通道原来全程只发 markdown，而 markdown 不支持 @all，
+            # 于是"台风逼近/已进入/升级"这种最该叫醒人的场景反而是静悄悄的。
+            # 这里按强度定级补发一条极短 text（只一行摘要），详情仍由 markdown 卡片承载。
+            level = imminent_notify_level(remain, escalated)
+            use_at_all, duty_users, duty_mobiles, reason = mention_plan(state, level, key)
+            if level != "L1":
+                hours = int(remain // 3600)
+                if remain < 0:
+                    core = (f"台风“{t['cn']}”已进入海南影响范围，"
+                            f"请立即关注官方台风预警信号并做好防御。")
+                else:
+                    core = (f"台风“{t['cn']}”（编号{t['num']}）预计 {fmt_dt(eta['time'])} "
+                            f"前后进入海南影响范围，剩余约 {hours} 小时，请提前做好防风准备。")
+                mark = {"强度升级": "⬆️ 强度已升级 · ",
+                        "预计时间提前": "⬆️ 进入时间提前 · "}.get(escalated, "🌀 ")
+                brief = mark + core
+                wechat_text(brief,
+                            mention_list=(["@all"] if use_at_all else duty_users),
+                            mention_mobile=duty_mobiles)
+                if not use_at_all:
+                    note = ("夜间静默，已改为点名值班人" if (duty_users or duty_mobiles)
+                            else f"{reason}，本次未 @ 全体")
+                    msg += f"\n> （{note}）"
+
             ok = wechat_markdown(msg)
             # 附台风路径图（方案 A 下用 image 消息呈现路径，最直观）
             img = render_track_image(cur, det["forecast"], det.get("track"),
@@ -1711,12 +1882,15 @@ def check_imminent(state):
                                "eta_bjt": fmt_dt(eta["time"]),
                                "remain_hours": int(remain // 3600),
                                "strength": cur.get("strength"), "rank": rank,
-                               "escalate": escalated, "ok": ok, "note": title})
+                               "escalate": escalated, "ok": ok, "note": title,
+                               "notify_level": level, "at_all": bool(use_at_all)})
             alerted[key] = {"cn": t["cn"], "num": t["num"], "eta": eta["time"],
                             "eta_epoch": eta_epoch, "rank": rank,
                             "strength": cur.get("strength")}
             changed = True
-            log(f"[{escalated}] 实时推送:", t["cn"], "剩余约", int(remain // 3600), "小时")
+            log(f"[{escalated}] 实时推送:", t["cn"], level,
+                "剩余约", int(remain // 3600), "小时",
+                "·@all" if use_at_all else "·不@")
         except Exception as e:
             log("imminent 处理异常", t.get("id"), repr(e))
             continue
@@ -1819,7 +1993,7 @@ def mode_poll():
 
     # 统一合并推送：多条预警共用 1 条详情卡 + 1 条 @all 提醒
     if pending:
-        n_ok = push_alerts([(a, r) for a, r, _ in pending])
+        n_ok = push_alerts([(a, r) for a, r, _ in pending], state=state)
         if n_ok:
             pushed = n_ok
             for _, _, k in pending:
