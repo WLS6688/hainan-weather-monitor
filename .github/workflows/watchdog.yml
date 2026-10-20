@@ -16,7 +16,7 @@ jobs:
     steps:
       - name: 检查最近一次 monitor 执行间隔
         env:
-          WECOM_WEBHOOK: ${{ secrets.WECOM_WEBHOOK }}
+          WECOM_WEBHOOK: ${{ secrets.WECHAT_WEBHOOK }}
         run: |
           set -e
           REPO="WLS6688/hainan-weather-monitor"
