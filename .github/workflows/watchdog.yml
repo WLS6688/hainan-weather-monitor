@@ -1,0 +1,46 @@
+name: 预警监控看门狗（云端自监督）
+
+on:
+  schedule:
+    # 每 30 分钟检查一次 monitor 工作流是否还在跑
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  watchdog:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: 检查最近一次 monitor 执行间隔
+        env:
+          WECOM_WEBHOOK: ${{ secrets.WECOM_WEBHOOK }}
+        run: |
+          set -e
+          REPO="WLS6688/hainan-weather-monitor"
+          now=$(date -u +%s)
+          created=$(curl -s "https://api.github.com/repos/$REPO/actions/runs?per_page=1" \
+            | python3 -c "import sys,json,datetime; d=json.load(sys.stdin); r=d['workflow_runs'][0]['created_at']; print(int(datetime.datetime.strptime(r,'%Y-%m-%dT%H:%M:%SZ').timestamp()))")
+          gap=$(( (now - created) / 60 ))
+          echo "最近一次 monitor 执行距今 ${gap} 分钟"
+          if [ "$gap" -gt 30 ]; then
+            bj=$(date -u -d "+8 hours" '+%Y-%m-%d %H:%M' 2>/dev/null || date -u -v+8H '+%Y-%m-%d %H:%M')
+            msg="⚠️ 海南预警监控已 ${gap} 分钟未执行（最后约 ${bj} 北京时间），GitHub Actions 可能已静默停摆。请到 https://github.com/WLS6688/hainan-weather-monitor/actions 手动 Run workflow 补触发一次，或检查外部 cron 是否存活。"
+            if [ -n "$WECOM_WEBHOOK" ]; then
+              python3 - "$msg" "$WECOM_WEBHOOK" <<'PY'
+          import sys, urllib.request, json
+          msg, webhook = sys.argv[1], sys.argv[2]
+          data = json.dumps({"msgtype": "text", "text": {"content": msg}}).encode()
+          req = urllib.request.Request(webhook, data=data, headers={"Content-Type": "application/json"})
+          urllib.request.urlopen(req, timeout=15)
+          print("已推送企业微信告警")
+          PY
+            else
+              echo "未配置 WECOM_WEBHOOK secret，仅打印告警："
+              echo "$msg"
+            fi
+          else
+            echo "监控正常（间隔 ${gap} 分钟）"
+          fi
