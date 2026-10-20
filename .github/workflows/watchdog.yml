@@ -2,8 +2,8 @@ name: 预警监控看门狗（云端自监督）
 
 on:
   schedule:
-    # 每 30 分钟检查一次 monitor 工作流是否还在跑
-    - cron: '*/30 * * * *'
+    # 每 30 分钟检查一次 monitor 工作流是否还在跑（避开整点，防 GitHub 丢调度）
+    - cron: '13,43 * * * *'
   workflow_dispatch:
 
 permissions:
