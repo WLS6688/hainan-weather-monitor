@@ -74,3 +74,4 @@
 {"ts": "2026-10-17 08:02:07", "kind": "daily", "msgtype": "markdown", "active": 0, "land": 0, "sea": 0, "typhoon": 0, "parts": 1, "ok": true}
 {"ts": "2026-10-18 08:01:24", "kind": "daily", "msgtype": "markdown", "active": 0, "land": 0, "sea": 0, "typhoon": 0, "parts": 1, "ok": true}
 {"ts": "2026-10-19 08:01:11", "kind": "daily", "msgtype": "markdown", "active": 0, "land": 0, "sea": 0, "typhoon": 0, "parts": 1, "ok": true}
+{"ts": "2026-10-20 08:02:13", "kind": "daily", "msgtype": "markdown", "active": 2, "land": 1, "sea": 1, "typhoon": 0, "parts": 1, "ok": true}
