@@ -840,17 +840,35 @@ def alert_notify_level(items):
     return "L2"              # 橙色首现 / 内容变动
 
 
-def imminent_notify_level(remain, escalated):
+# —— 台风"按到澄迈的距离"分档（km）——
+# 远(>300)→只发路径图卡片(L1)；中(100<~≤300)→轻@(L2)；近(≤100)→强@(L3)
+TYPHOON_TIER_FAR_KM = 300.0
+TYPHOON_TIER_NEAR_KM = 100.0
+
+
+def typhoon_proximity_km(cur, box_fc):
+    """台风当前中心 + 进入海南框的最近预报点，到澄迈的直线距离(km)（取最小）。"""
+    pts = [cur] + list(box_fc)
+    return min(haversine(p["lat"], p["lon"], CHENGMAI_LAT, CHENGMAI_LON) for p in pts)
+
+
+def imminent_notify_level(remain, escalated, km=None):
     """台风通道的提醒强度。
 
-    强度升级与"预计进入时间提前"等同于预警升级，按 L3 处理；
-    台风已进入影响范围（remain ≤ 0）也是 L3；
-    逼近（≤48h）是 L2；远距离趋向（>48h）只是预告，L1 不打扰。
+    强度升级 / 预计时间提前 / 已进入影响范围 = 无条件 L3（真紧急不让被限流挡住）；
+    其余按"到澄迈的距离"分档：≤100km 强@(L3)、≤300km 轻@(L2)、>300km 只发卡片(L1)；
+    无距离信息时回退到原时间逻辑（≤48h→L2，否则 L1）。
     """
     if escalated in ("强度升级", "预计时间提前"):
         return "L3"
     if remain < 0:
         return "L3"
+    if km is not None:
+        if km <= TYPHOON_TIER_NEAR_KM:
+            return "L3"
+        if km <= TYPHOON_TIER_FAR_KM:
+            return "L2"
+        return "L1"
     if remain <= 48 * 3600:
         return "L2"
     return "L1"
@@ -1208,6 +1226,11 @@ def render_track_image(cur, forecast, track=None, title="台风路径预报"):
                 markeredgecolor="white", zorder=5)
         ax.text(cur["lon"] + 0.2, cur["lat"] + 0.2, "当前位置" if cn else "Now",
                 fontsize=9, color="#A32D2D")
+        km_cm = haversine(cur["lat"], cur["lon"], CHENGMAI_LAT, CHENGMAI_LON)
+        dist_txt = (f"距澄迈 ≈ {int(round(km_cm))} km"
+                    if cn else f"~{int(round(km_cm))} km to Chengmai")
+        ax.text(cur["lon"] + 0.2, cur["lat"] - 0.5, dist_txt,
+                fontsize=8, color="#A32D2D")
         # 图例
         from matplotlib.lines import Line2D
         ax.legend(handles=[
@@ -1850,7 +1873,8 @@ def check_imminent(state):
             # ---- 全员提醒：台风通道原来全程只发 markdown，而 markdown 不支持 @all，
             # 于是"台风逼近/已进入/升级"这种最该叫醒人的场景反而是静悄悄的。
             # 这里按强度定级补发一条极短 text（只一行摘要），详情仍由 markdown 卡片承载。
-            level = imminent_notify_level(remain, escalated)
+            km_cm = typhoon_proximity_km(cur, box_fc)
+            level = imminent_notify_level(remain, escalated, km_cm)
             use_at_all, duty_users, duty_mobiles, reason = mention_plan(state, level, key)
             if level != "L1":
                 hours = int(remain // 3600)
@@ -1881,6 +1905,7 @@ def check_imminent(state):
                         extra={"cn": t["cn"], "num": t["num"], "eta": eta["time"],
                                "eta_bjt": fmt_dt(eta["time"]),
                                "remain_hours": int(remain // 3600),
+                               "proximity_km": int(round(km_cm)),
                                "strength": cur.get("strength"), "rank": rank,
                                "escalate": escalated, "ok": ok, "note": title,
                                "notify_level": level, "at_all": bool(use_at_all)})
@@ -1889,6 +1914,7 @@ def check_imminent(state):
                             "strength": cur.get("strength")}
             changed = True
             log(f"[{escalated}] 实时推送:", t["cn"], level,
+                "距澄迈约", int(round(km_cm)), "km",
                 "剩余约", int(remain // 3600), "小时",
                 "·@all" if use_at_all else "·不@")
         except Exception as e:
