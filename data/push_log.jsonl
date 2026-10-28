@@ -89,3 +89,4 @@
 {"ts": "2026-10-25 21:11:09", "kind": "recovered", "msgtype": "markdown", "ok": true}
 {"ts": "2026-10-26 08:01:23", "kind": "daily", "msgtype": "markdown", "active": 0, "land": 0, "sea": 0, "typhoon": 0, "parts": 1, "ok": true}
 {"ts": "2026-10-27 08:01:29", "kind": "daily", "msgtype": "markdown", "active": 1, "land": 1, "sea": 0, "typhoon": 0, "parts": 1, "ok": true}
+{"ts": "2026-10-28 08:01:08", "kind": "daily", "msgtype": "markdown", "active": 1, "land": 0, "sea": 1, "typhoon": 0, "parts": 1, "ok": true}
