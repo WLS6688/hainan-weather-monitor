@@ -55,7 +55,7 @@ jobs:
             ${{ runner.os }}-pip-
 
       - name: 安装依赖
-        run: python3 -m pip install --quiet matplotlib
+        run: python3 -m pip install --quiet pillow matplotlib
 
       # 网络层使用标准库 urllib；matplotlib 用于生成台风路径图（中文字体已随仓库提供）
       # ⚠️ 修改上面的 cron 表达式时，下面的判断串必须同步修改，
