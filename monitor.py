@@ -840,35 +840,17 @@ def alert_notify_level(items):
     return "L2"              # 橙色首现 / 内容变动
 
 
-# —— 台风"按到澄迈的距离"分档（km）——
-# 远(>300)→只发路径图卡片(L1)；中(100<~≤300)→轻@(L2)；近(≤100)→强@(L3)
-TYPHOON_TIER_FAR_KM = 300.0
-TYPHOON_TIER_NEAR_KM = 100.0
-
-
-def typhoon_proximity_km(cur, box_fc):
-    """台风当前中心 + 进入海南框的最近预报点，到澄迈的直线距离(km)（取最小）。"""
-    pts = [cur] + list(box_fc)
-    return min(haversine(p["lat"], p["lon"], CHENGMAI_LAT, CHENGMAI_LON) for p in pts)
-
-
-def imminent_notify_level(remain, escalated, km=None):
+def imminent_notify_level(remain, escalated):
     """台风通道的提醒强度。
 
-    强度升级 / 预计时间提前 / 已进入影响范围 = 无条件 L3（真紧急不让被限流挡住）；
-    其余按"到澄迈的距离"分档：≤100km 强@(L3)、≤300km 轻@(L2)、>300km 只发卡片(L1)；
-    无距离信息时回退到原时间逻辑（≤48h→L2，否则 L1）。
+    强度升级与"预计进入时间提前"等同于预警升级，按 L3 处理；
+    台风已进入影响范围（remain ≤ 0）也是 L3；
+    逼近（≤48h）是 L2；远距离趋向（>48h）只是预告，L1 不打扰。
     """
     if escalated in ("强度升级", "预计时间提前"):
         return "L3"
     if remain < 0:
         return "L3"
-    if km is not None:
-        if km <= TYPHOON_TIER_NEAR_KM:
-            return "L3"
-        if km <= TYPHOON_TIER_FAR_KM:
-            return "L2"
-        return "L1"
     if remain <= 48 * 3600:
         return "L2"
     return "L1"
@@ -1109,6 +1091,29 @@ def push_alerts(items, state=None):
         except Exception as e:
             log("台风预警附图失败（不影响已发出的预警）:", repr(e))
 
+    # 附加：生效预警卡（iOS 风格图片，增强可读性）。失败不影响已发出的文字消息。
+    try:
+        from card_render import render_alert_card
+        card_alerts = [{
+            "level": a.get("level"), "type": a.get("type"),
+            "issuer": a.get("issuer") or a.get("region") or "",
+            "time": short_eff(a.get("effective")),
+            "core": alert_core(a) or a.get("headline", ""),
+            "to": short_eff(a.get("effective")),
+            "area": ("沿海 🌊" if (a.get("type") in COASTAL_TYPES) else "老城 📍"),
+        } for a in alerts]
+        track = None
+        if any(a.get("type") == "台风" for a in alerts):
+            det = pick_primary_typhoon()
+            if det and det.get("relevance", 0) >= 1:
+                track = render_track_image(det["cur"], det["forecast"], det.get("track"),
+                                           title=f"台风“{det.get('cn', '')}”路径预报")
+        png = render_alert_card(card_alerts, track=track)
+        if png and wechat_image(png):
+            record_push("alert_card", msgtype="image", extra={"n": n})
+    except Exception as e:
+        log("生效预警卡渲染失败（不影响文字推送）:", repr(e))
+
     for a, r in items:
         record_push("alert", a, msgtype="markdown+text",
                     extra={"tier": "red" if a["level"] == "红色" else "orange",
@@ -1226,11 +1231,6 @@ def render_track_image(cur, forecast, track=None, title="台风路径预报"):
                 markeredgecolor="white", zorder=5)
         ax.text(cur["lon"] + 0.2, cur["lat"] + 0.2, "当前位置" if cn else "Now",
                 fontsize=9, color="#A32D2D")
-        km_cm = haversine(cur["lat"], cur["lon"], CHENGMAI_LAT, CHENGMAI_LON)
-        dist_txt = (f"距澄迈 ≈ {int(round(km_cm))} km"
-                    if cn else f"~{int(round(km_cm))} km to Chengmai")
-        ax.text(cur["lon"] + 0.2, cur["lat"] - 0.5, dist_txt,
-                fontsize=8, color="#A32D2D")
         # 图例
         from matplotlib.lines import Line2D
         ax.legend(handles=[
@@ -1873,8 +1873,7 @@ def check_imminent(state):
             # ---- 全员提醒：台风通道原来全程只发 markdown，而 markdown 不支持 @all，
             # 于是"台风逼近/已进入/升级"这种最该叫醒人的场景反而是静悄悄的。
             # 这里按强度定级补发一条极短 text（只一行摘要），详情仍由 markdown 卡片承载。
-            km_cm = typhoon_proximity_km(cur, box_fc)
-            level = imminent_notify_level(remain, escalated, km_cm)
+            level = imminent_notify_level(remain, escalated)
             use_at_all, duty_users, duty_mobiles, reason = mention_plan(state, level, key)
             if level != "L1":
                 hours = int(remain // 3600)
@@ -1887,6 +1886,11 @@ def check_imminent(state):
                 mark = {"强度升级": "⬆️ 强度已升级 · ",
                         "预计时间提前": "⬆️ 进入时间提前 · "}.get(escalated, "🌀 ")
                 brief = mark + core
+                # @文本分支附带台风实时路径链接（nmc 权威源），方便值班人一键查看
+                ty_link = "https://typhoon.nmc.cn/"
+                if t.get("id"):
+                    ty_link = f"https://typhoon.nmc.cn/view.html?id={t['id']}"
+                brief = brief + f"\n实时路径：{ty_link}"
                 wechat_text(brief,
                             mention_list=(["@all"] if use_at_all else duty_users),
                             mention_mobile=duty_mobiles)
@@ -1905,7 +1909,6 @@ def check_imminent(state):
                         extra={"cn": t["cn"], "num": t["num"], "eta": eta["time"],
                                "eta_bjt": fmt_dt(eta["time"]),
                                "remain_hours": int(remain // 3600),
-                               "proximity_km": int(round(km_cm)),
                                "strength": cur.get("strength"), "rank": rank,
                                "escalate": escalated, "ok": ok, "note": title,
                                "notify_level": level, "at_all": bool(use_at_all)})
@@ -1914,7 +1917,6 @@ def check_imminent(state):
                             "strength": cur.get("strength")}
             changed = True
             log(f"[{escalated}] 实时推送:", t["cn"], level,
-                "距澄迈约", int(round(km_cm)), "km",
                 "剩余约", int(remain // 3600), "小时",
                 "·@all" if use_at_all else "·不@")
         except Exception as e:
@@ -1985,18 +1987,72 @@ def mode_poll():
             new_rank = LEVEL_RANK.get(a["level"], -1)
             downgraded = (bool(rec.get("pushed")) and old_rank >= 0 and new_rank >= 0
                           and new_rank < old_rank)
+            upgraded = (bool(rec.get("pushed")) and old_rank >= 0 and new_rank >= 0
+                        and new_rank > old_rank)
             in_focus = town_scope(a) != "other"
             if tier and in_focus and (now - last) >= PUSH_DEDUP_SECONDS:
-                pending.append((a, False, a["key"]))
-                log(f"[变动] 待推送: {a['headline']}")
+                if upgraded:
+                    # 升级：发升级变更卡（iOS 风格），不再走通用生效卡
+                    try:
+                        from card_render import render_transition_card
+                        td = {
+                            "level": a["level"], "type": a["type"],
+                            "issuer": a.get("issuer") or a.get("region") or "",
+                            "time": short_eff(a.get("effective")),
+                            "core": alert_core(a) or a.get("headline", ""),
+                            "area": ("沿海 🌊" if (a.get("type") in COASTAL_TYPES) else "老城 📍"),
+                        }
+                        det = pick_primary_typhoon() if a.get("type") == "台风" else None
+                        track = None
+                        if det and det.get("relevance", 0) >= 1:
+                            track = render_track_image(det["cur"], det["forecast"],
+                                                       det.get("track"),
+                                                       title=f"台风“{det.get('cn', '')}”路径预报")
+                        png = render_transition_card("upgrade", td, prev_level=rec.get("level"))
+                        if png and wechat_image(png):
+                            record_push("upgraded", a, msgtype="image",
+                                        extra={"from_level": rec.get("level"), "to_level": a["level"]})
+                            if track:   # 台风升级另附路径图（与生效卡一致）
+                                wechat_image(track)
+                                record_push("upgraded_track", msgtype="image",
+                                            extra={"cn": det.get("cn", "")})
+                        else:
+                            wechat_markdown(f"> **预警升级**：{rec.get('level')} → {a['level']}\n> {alert_title(a)}")
+                    except Exception as e:
+                        log("升级变更卡失败，回退文字:", repr(e))
+                        wechat_markdown(f"> **预警升级**：{rec.get('level')} → {a['level']}\n> {alert_title(a)}")
+                    rec["last_push"] = now
+                    rec["pushed"] = True
+                    log(f"[升级] 通知: {rec.get('level')} → {a['level']} {a['headline']}")
+                else:
+                    pending.append((a, False, a["key"]))
+                    log(f"[变动] 待推送: {a['headline']}")
             elif downgraded and in_focus:
-                ok = wechat_markdown(
-                    f"> **预警降级**：{rec.get('level')} → {a['level']}\n"
-                    f"> {alert_title(a)}\n"
-                    f"> 发布：{a['issuer'] or a['region']} ｜ {a['effective']}\n"
-                    f"> 请以最新预警信号为准。")
-                record_push("downgraded", a, msgtype="markdown",
-                            extra={"from_level": rec.get("level"), "ok": ok})
+                sent_card = False
+                try:
+                    from card_render import render_transition_card
+                    td = {
+                        "level": a["level"], "type": a["type"],
+                        "issuer": a.get("issuer") or a.get("region") or "",
+                        "time": short_eff(a.get("effective")),
+                        "core": alert_core(a) or a.get("headline", ""),
+                        "area": ("沿海 🌊" if (a.get("type") in COASTAL_TYPES) else "老城 📍"),
+                    }
+                    png = render_transition_card("downgrade", td, prev_level=rec.get("level"))
+                    if png and wechat_image(png):
+                        sent_card = True
+                        record_push("downgraded", a, msgtype="image",
+                                    extra={"from_level": rec.get("level"), "ok": True})
+                except Exception as e:
+                    log("降级变更卡渲染失败（回退文字）:", repr(e))
+                if not sent_card:
+                    ok = wechat_markdown(
+                        f"> **预警降级**：{rec.get('level')} → {a['level']}\n"
+                        f"> {alert_title(a)}\n"
+                        f"> 发布：{a['issuer'] or a['region']} ｜ {a['effective']}\n"
+                        f"> 请以最新预警信号为准。")
+                    record_push("downgraded", a, msgtype="markdown",
+                                extra={"from_level": rec.get("level"), "ok": ok})
                 rec["last_push"] = now
                 log(f"[降级] 通知: {rec.get('level')} → {a['level']} {a['headline']}")
             elif tier:
@@ -2038,12 +2094,31 @@ def mode_poll():
         if old.get("pushed"):
             began = old.get("first_seen") or old.get("last_push") or 0
             dur = fmt_dur(max(0.0, now - alert_begin_epoch(old, began))) if began else ""
-            ok = wechat_markdown(f"> **预警解除**：{old.get('headline', '')}"
-                                 + (f"\n> 本次持续 {dur}" if dur else ""))
-            record_push("lifted", msgtype="markdown",
-                        extra={"level": old.get("level"), "type": old.get("type"),
-                               "region": old.get("region"), "headline": old.get("headline", ""),
-                               "ok": ok})
+            sent_card = False
+            try:
+                from card_render import render_transition_card
+                td = {
+                    "level": old.get("level", ""), "type": old.get("type", ""),
+                    "issuer": old.get("issuer") or old.get("region") or "",
+                    "time": short_eff(old.get("effective")),
+                    "core": old.get("headline", ""),
+                }
+                png = render_transition_card("lift", td)
+                if png and wechat_image(png):
+                    sent_card = True
+                    record_push("lifted", msgtype="image",
+                                extra={"level": old.get("level"), "type": old.get("type"),
+                                       "region": old.get("region"), "headline": old.get("headline", ""),
+                                       "ok": True})
+            except Exception as e:
+                log("解除变更卡渲染失败（回退文字）:", repr(e))
+            if not sent_card:
+                ok = wechat_markdown(f"> **预警解除**：{old.get('headline', '')}"
+                                     + (f"\n> 本次持续 {dur}" if dur else ""))
+                record_push("lifted", msgtype="markdown",
+                            extra={"level": old.get("level"), "type": old.get("type"),
+                                   "region": old.get("region"), "headline": old.get("headline", ""),
+                                   "ok": ok})
             lifted += 1
             log(f"[解除] 通知: {old.get('headline', '')}")
 
@@ -2228,6 +2303,116 @@ def short_eff(s):
         return (s or "").strip()
 
 
+def fetch_forecast_card(lat=CHENGMAI_LAT, lon=CHENGMAI_LON, tries=2):
+    """拉取日报卡所需的逐小时 + 未来5日预报（Open-Meteo，免 key）。失败返回 None。"""
+    url = ("https://api.open-meteo.com/v1/forecast"
+           f"?latitude={lat}&longitude={lon}"
+           "&current=temperature_2m,weather_code"
+           "&hourly=temperature_2m,weather_code,precipitation_probability"
+           "&daily=weather_code,temperature_2m_max,temperature_2m_min,"
+           "precipitation_probability_max"
+           "&timezone=Asia%2FShanghai&forecast_days=5&wind_speed_unit=kmh")
+    for _ in range(tries):
+        try:
+            raw = http_get(url, {"User-Agent": "Mozilla/5.0"}, timeout=15)
+            d = json.loads(raw)
+            cur = d.get("current") or {}
+            hr = d.get("hourly") or {}
+            dy = d.get("daily") or {}
+            htimes = hr.get("time") or []
+            htemp = hr.get("temperature_2m") or []
+            hcode = hr.get("weather_code") or []
+            hpop = hr.get("precipitation_probability") or []
+            now_h = datetime.now(BEIJING).strftime("%Y-%m-%dT%H:00")
+            try:
+                si = htimes.index(now_h)
+            except ValueError:
+                si = 0
+            labels = ["现在"] + [f"{int(htimes[si + i][11:13])}时" for i in range(1, 6)
+                                if si + i < len(htimes)]
+            hourly = []
+            for i in range(min(6, len(htimes) - si)):
+                idx = si + i
+                if idx >= len(htimes):
+                    break
+                hourly.append((labels[i], wmo_to_icon(hcode[idx]),
+                              int(round(htemp[idx])),
+                              (int(hpop[idx]) if hpop[idx] is not None else None)))
+            dtimes = dy.get("time") or []
+            dcode = dy.get("weather_code") or []
+            dtmax = dy.get("temperature_2m_max") or []
+            dtmin = dy.get("temperature_2m_min") or []
+            dpop = dy.get("precipitation_probability_max") or []
+            dlabels = ["今天", "明天", "后天", "大后天", "第5天"]
+            daily = []
+            for i in range(min(5, len(dtimes))):
+                daily.append((dlabels[i], wmo_to_icon(dcode[i]),
+                              int(round(dtmin[i])), int(round(dtmax[i])),
+                              (int(dpop[i]) if dpop[i] is not None else 0)))
+            return {
+                "temp_now": cur.get("temperature_2m"),
+                "code_now": cur.get("weather_code"),
+                "tmax": (dtmax[0] if dtmax else None),
+                "tmin": (dtmin[0] if dtmin else None),
+                "hourly": hourly, "daily": daily,
+            }
+        except Exception as e:
+            log("forecast_card error:", e)
+        time.sleep(2)
+    return None
+
+
+def wmo_to_icon(code):
+    from card_render import wmo_to_weather
+    w = wmo_to_weather(code)
+    if w in ("clear", "partly"):
+        return "sun"
+    if w in ("cloud", "fog"):
+        return "cloud"
+    if w == "rain":
+        return "rain"
+    if w == "thunder":
+        return "thunder"
+    if w == "snow":
+        return "snow"
+    return "cloud"
+
+
+def build_daily_card_image(active):
+    """用实时数据渲染 iOS 风格日报卡 PNG bytes；任何异常返回 None（交由 markdown 兜底）。"""
+    try:
+        from card_render import render_daily_card, wmo_to_weather
+        land = [a for a in active if not a["is_sea"]]
+        alerts = []
+        for a in land:
+            alerts.append({
+                "level": a.get("level") or "未知",
+                "type": a.get("type") or "",
+                "time": short_eff(a.get("effective")),
+                "note": (alert_core(a) or a.get("headline", ""))[:42],
+            })
+        fc = fetch_forecast_card()
+        if not fc or fc.get("temp_now") is None:
+            return None
+        weather = wmo_to_weather(fc.get("code_now"))
+        ty_text = None
+        for hint in (typhoon_outlook(), disturbance_outlook()):
+            real = [h for h in (hint or []) if not any(k in h for k in EMPTY_HINT_WORDS)]
+            if real:
+                ty_text = re.sub(r"^(台风趋势提示|热带扰动监测|热带扰动提示)\s*[：:]?\s*",
+                                 "", real[0].lstrip("> ").strip())
+                break
+        return render_daily_card(
+            place="澄迈县", temp=int(round(fc["temp_now"])),
+            tmax=int(round(fc["tmax"])), tmin=int(round(fc["tmin"])),
+            desc=WMO_WEATHER.get(fc.get("code_now"), ""),
+            weather=weather, alerts=alerts, hourly=fc["hourly"], daily=fc["daily"],
+            typhoon_text=ty_text, compact=True)
+    except Exception as e:
+        log("日报卡渲染失败（回退 markdown）:", repr(e))
+        return None
+
+
 def mode_daily():
     if another_run_active():
         return
@@ -2312,6 +2497,33 @@ def mode_daily():
         lines.append(f"> ⚠️ 数据获取异常：{'；'.join(errors)}")
 
     md = "\n".join(lines)
+
+    # —— 卡片版（iOS 风格）优先；渲染或发送失败则回退极简 markdown ——
+    card_png = build_daily_card_image(active)
+    if card_png and wechat_image(card_png):
+        record_push("daily_card", msgtype="image",
+                    extra={"active": len(active), "land": len(land),
+                           "typhoon": len(typhoon_alerts)})
+        # 附台风路径图（仅对海南有影响时）
+        det_primary = pick_primary_typhoon()
+        if det_primary and det_primary.get("relevance", 0) >= 1:
+            cur = det_primary["cur"]
+            km = haversine(cur["lat"], cur["lon"], CHENGMAI_LAT, CHENGMAI_LON)
+            title = (f"台风“{det_primary.get('cn', '')}”路径预报"
+                     f" ｜ 距澄迈约 {int(round(km))} 公里")
+            img = render_track_image(cur, det_primary["forecast"],
+                                     det_primary.get("track"), title=title)
+            if img:
+                wechat_image(img)
+                record_push("daily_image", msgtype="image",
+                            extra={"cn": det_primary.get("cn", "")})
+        state["last_daily_report_date"] = today
+        save_state(state)
+        commit_state()
+        log("每日报告（卡片版）已推送")
+        return
+
+    # —— 回退：极简 markdown ——
     parts = split_md(md)      # 预警多时单片会超过企业微信上限被整体丢弃，必须分片
     ok = True
     for i, part in enumerate(parts, 1):
@@ -2323,14 +2535,11 @@ def mode_daily():
                        "typhoon": len(typhoon_alerts), "parts": len(parts), "ok": ok})
 
     # 推送失败时不标记完成：让「迟到补发」在下一轮 poll 自动重试。
-    # 原实现无论成功失败都写 last_daily_report_date，一次失败＝当天日报永久丢失。
     if not ok:
         log("每日报告推送失败，不标记今日已完成，等待下一轮补发")
         return
 
     # 附台风路径图：只在对海南有影响时才附图（relevance >= 1）。
-    # 旧逻辑是"只要有编号台风就发图"，于是远在西北太平洋、跟海南毫无关系的台风
-    # 每天也占一条图片消息（推送日志里 9-27~10-05 每天都有一条 daily_image）。
     det_primary = pick_primary_typhoon()
     if det_primary and det_primary.get("relevance", 0) >= 1:
         cur = det_primary["cur"]
