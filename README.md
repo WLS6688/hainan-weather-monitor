@@ -107,7 +107,7 @@ git push -u origin main
 1. 打开你的仓库页面 → `Settings` → `Secrets and variables` → `Actions`
 2. 点 `New repository secret`
 3. Name 填：`WECHAT_WEBHOOK`（与 `.github/workflows/monitor.yml` 中 `secrets.WECHAT_WEBHOOK` 对应）
-4. Value 填你的 webhook：`https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=6cbed4be-c980-41cb-8e1b-625f4ea8e017`
+4. Value 填你的 webhook：`https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`
 5. 点 `Add secret`
 
 ### 第 4 步：启用工作流
