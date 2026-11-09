@@ -189,3 +189,15 @@ tools/subset_font.py            # 字体子集化脚本（需要重新精简字�
 data/                           # 推送历史与溯源记录（自动维护，见 data/README.md）
 state.json                      # 状态文件（自动生成，记录预警等级与去重时间）
 ```
+
+## 七、台风路径卡片推送（新增 · 2026-11-09）
+
+本仓库新增一个**独立**脚本 `push_typhoon_card.py`（与 `monitor.py` 解耦，仅标准库、零第三方依赖），用于通过企业微信群机器人发送「腾讯会议式」的模板卡片（template_card），一键进入中央气象台台风实时路径图。
+
+- **只推影响海南的台风**：依据 nmc 公开接口（`typhoon.nmc.cn` 的 `list_default` + `view_{id}`）取出的路径点，只要任一路径点落入海南邻近海域矩形框（lat 17–21.5°N / lon 107.5–112°E），或距海南中心（19.2°N, 109.7°E）≤ `HAINAN_MAX_KM`（默认 550km，可用环境变量调）即视为影响海南才推送；不影响海南的台风静默跳过。
+- **卡片形式**：默认 `news_notice` 图文卡，顶部直接取中央气象台公开图床 `image.nmc.cn` 的官方概率预报图（无需 playwright 截图、无需自建图床、零算力）；也内置 `text_notice` 纯文字+按钮卡作为备选。
+- **用法**：设环境变量 `WECHAT_WEBHOOK`（群机器人地址）后，`python push_typhoon_card.py --with-image` 即推；`--dry` 仅打印 JSON；`--force` 跳过海南判定强制推送（测试用，卡片标「测试推送」）。
+- **配套文件**：`.env.example`（配置模板）、`wechat-card-workflow.yml`（GitHub Actions 样例，需经网页手动放入 `.github/workflows/`，因本仓库 token 无 Workflows 权限）。
+- **安全**：原 README 中明文 webhook key 已脱敏为占位符；真实 key 仅存于仓库 Secret 与本地 `.env`，请勿写入任何公开文件。
+
+> 该脚本与现有预警监控共用同一群机器人「气象预警小助手」，仅在台风影响海南时补充推送路径卡片，不与原有预警逻辑冲突。
