@@ -58,7 +58,7 @@ HAINAN_BOX = dict(lat_min=17.0, lat_max=21.5, lon_min=107.5, lon_max=112.0)
 # ---------- 配置 ----------
 TYPHOON_LIST_URL = "http://typhoon.nmc.cn/weatherservice/typhoon/jsons/list_default"
 TYPHOON_VIEW_URL = "http://typhoon.nmc.cn/weatherservice/typhoon/jsons/view_{id}"
-PATH_URL = os.environ.get("TYPHOON_PATH_URL", "https://typhoon.nmc.cn/web.html")
+PATH_URL = os.environ.get("TYPHOON_PATH_URL") or "https://typhoon.nmc.cn/web.html"
 WEBHOOK = os.environ.get("WECHAT_WEBHOOK")
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN")
 CDN_REPO = os.environ.get("CDN_REPO", "WLS6688/hainan-weather-monitor")
