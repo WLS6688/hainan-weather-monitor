@@ -21,12 +21,12 @@
   | 正文**实质变化**（风力加大、雨量上调、影响时段/范围变化） | ✅ 推送 |
   | 官方"**继续发布**"、内容与上次相同（仅发布时间不同） | ❌ 不推（避免每十几分钟刷屏） |
   | 预警**解除**（仅陆地、且曾推送过） | ✅ 推一条「预警解除」 |
-  | 台风预报路径**首次**进入海南影响范围 | ✅ 推官方概率预报图卡片（template_card）+ `text` `@all` 逼近提醒；之后仅强度升级 / 进入时间提前再补推 |
+  | 台风预报路径**首次**进入海南影响范围 | ✅ 推卡片 + 路径图；逼近（≤48h）时另补一条 `text` `@all` |
   | 台风**强度升级 ≥1 级** 或 **预计进入时间提前 ≥6 小时** | ✅ 补推一条升级提示，并 `@all` |
 - **去重键**：用「发布机构 + 灾种」作稳定键（而非官方 id）。官方 id 内含**发布时刻**，每次"继续发布"都会换 id；若直接用 id，会把"继续发布"误判成"解除 + 新预警"，导致群里反复出现"预警解除"和重复 `@`
 - **时间基准**：中央气象台台风接口返回的是**世界时（UTC）**，展示时已统一换算为**北京时**
 - **解析兜底**：若官方标题格式异常导致正则无法解析类型/等级，则改用关键词（暴雨/大风/雷电/洪水/山洪/地质灾害/风暴潮/海浪… 及 蓝黄橙红白）兜底识别，避免漏报
-- **台风路径图**：台风相关视觉已统一为中央气象台公开图床 `image.nmc.cn` 的**官方概率预报图 `template_card`**（逼近预警 `check_imminent` 与周期快照 `check_typhoon_card` 共用）；预警升级 / 降级变更卡仍用本地生成的 **中文路径图**（`render_track_image` + `assets/SimHei.ttf`）作为 `image` 消息；所有卡片均附 `[实时台风路径·点击查看]` 可点击链接，跳转中央气象台台风网
+- **台风路径图**：当台风逼近/影响海南时，用中央气象台实时路径数据生成 **中文路径图**，作为 `image` 消息发到群里；同时附带 `[实时台风路径·点击查看]` 可点击链接，跳转中央气象台台风网
 - **影响判断**：预警提到具体城市→影响该城；全省/全岛→影响澄迈/海口；**其他市县自行发布的预警一律不纳入**（省级接口会返回全省各市县预警，若全量收录，每日报告会被几十条无关预警淹没）
 - **海上 / 陆地判定**：以预警**信号名**是否含「海面 / 海上 / 琼州海峡 / 附近海域」等为准。**不用正文判定**——正文里"南海热带低压"这类天气系统表述会把陆地预警误判成海上预警而漏推
 
@@ -107,7 +107,7 @@ git push -u origin main
 1. 打开你的仓库页面 → `Settings` → `Secrets and variables` → `Actions`
 2. 点 `New repository secret`
 3. Name 填：`WECHAT_WEBHOOK`（与 `.github/workflows/monitor.yml` 中 `secrets.WECHAT_WEBHOOK` 对应）
-4. Value 填你的 webhook：`https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`
+4. Value 填你的 webhook：`https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`（实际 key 只放在 Secret，不要写进任何公开文件）
 5. 点 `Add secret`
 
 ### 第 4 步：启用工作流
@@ -189,13 +189,3 @@ tools/subset_font.py            # 字体子集化脚本（需要重新精简字�
 data/                           # 推送历史与溯源记录（自动维护，见 data/README.md）
 state.json                      # 状态文件（自动生成，记录预警等级与去重时间）
 ```
-
-## 七、台风路径卡片（已并入主系统 · 2026-11-11）
-
-台风路径卡片已**整合进 `monitor.py`**，与原有预警监控共用同一套轮询（`monitor.yml` 每 10 分钟）与同一个群机器人「气象预警小助手」，**不再是独立脚本 / 独立工作流**。
-
-- **实现位置**：`monitor.py` 新增 `check_typhoon_card()` —— 复用现有 `fetch_typhoon_list` / `fetch_typhoon_track` 与海南影响框 `HAINAN_BOX` / `in_box()` 判定「只推影响海南的台风」，每 3 小时节流推一张 `template_card`（`news_notice` 图文卡）。
-- **卡片形式**：顶部直接取中央气象台公开图床 `image.nmc.cn` 的**官方概率预报图**（无需 playwright 截图、无需自建图床、零算力）；官方图取不到时自动降级为 `text_notice` 纯文字 + 按钮卡。
-- **统一视觉**：原有 `check_imminent`（台风逼近预警）附的路径图也已从「自绘 matplotlib 路径图」换成同一张官方概率预报图卡片，台风相关视觉现在统一。
-- **退役独立脚本 / 工作流**：原先的 `push_typhoon_card.py` 与 `wechat-card-workflow.yml` 已删除，避免与 `monitor.yml` 双推刷屏。
-- **海南判定**：与全系统一致——实况或任一预报路径点落入海南影响框（`HAINAN_BOX`）；不影响海南的台风静默跳过。
