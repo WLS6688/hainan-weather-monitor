@@ -1089,17 +1089,14 @@ def push_alerts(items, state=None):
         ok_t = wechat_text(text, mention_list=mention, mention_mobile=duty_mobiles)
     ok = bool(ok_m or ok_t)
 
-    # 台风类预警顺带发一张路径图——沿用日报那把锁：只有当前位置或预报路径进入
-    # 海南关注框（relevance >= 1）的台风才画图，跟海南无关的台风只发文字，不占图片消息。
+    # 台风类预警路径图——沿用日报那把锁：只有当前位置或预报路径进入海南关注框
+    # （relevance >= 1）的台风才附图，跟海南无关的台风只发文字，不占图片消息。
+    # 统一使用中央气象台官方概率预报图（之前为 matplotlib 自绘，非权威且数据为合成）。
     if any(a.get("type") == "台风" for a in alerts):
         try:
             det = pick_primary_typhoon()
             if det and det.get("relevance", 0) >= 1:
-                cur = det["cur"]
-                km = haversine(cur["lat"], cur["lon"], CHENGMAI_LAT, CHENGMAI_LON)
-                img = render_track_image(cur, det["forecast"], det.get("track"),
-                                         title=f"台风“{det.get('cn', '')}”路径预报"
-                                               f" ｜ 距澄迈约 {int(round(km))} 公里")
+                img = fetch_official_track_bytes()
                 if img:
                     wechat_image(img)
                     record_push("alert_track_image", msgtype="image",
@@ -1122,8 +1119,7 @@ def push_alerts(items, state=None):
         if any(a.get("type") == "台风" for a in alerts):
             det = pick_primary_typhoon()
             if det and det.get("relevance", 0) >= 1:
-                track = render_track_image(det["cur"], det["forecast"], det.get("track"),
-                                           title=f"台风“{det.get('cn', '')}”路径预报")
+                track = fetch_official_track_bytes()
         png = render_alert_card(card_alerts, track=track)
         if png and wechat_image(png):
             record_push("alert_card", msgtype="image", extra={"n": n})
@@ -1989,6 +1985,31 @@ def fetch_official_image():
     return img
 
 
+def fetch_official_track_bytes():
+    """下载中央气象台官方概率预报图（JPG bytes），失败返回 None。
+
+    供各卡片内嵌台风路径使用，替代原先的 matplotlib 自绘（与 check_typhoon_card
+    共用同一权威图源，保证「卡片内路径」与「独立台风卡」视觉一致、且为真实预报）。
+    """
+    url = fetch_official_image()
+    if not url:
+        return None
+    try:
+        req = urllib.request.Request(url, headers={
+            "User-Agent": HEADERS["User-Agent"],
+            "Referer": "https://www.nmc.cn/"}, method="GET")
+        with urllib.request.urlopen(req, timeout=20) as r:
+            data = r.read()
+        # 注意：图床返回的文件虽以 .JPG 命名、Content-Type 标 image/jpeg，
+        # 实际字节是 PNG（文件头 \x89PNG）。两种魔术字节都放行。
+        if data[:2] in (b"\xff\xd8", b"\x89P"):
+            return data
+        log("官方路径图内容非图片，跳过")
+    except Exception as e:
+        log("官方路径图下载失败:", e)
+    return None
+
+
 def build_typhoon_card(t, det, img_url):
     """构造台风路径 template_card。有官方图 -> news_notice（大图）；否则 text_notice 兜底。"""
     cur = det["cur"]
@@ -2161,9 +2182,7 @@ def mode_poll():
                         det = pick_primary_typhoon() if a.get("type") == "台风" else None
                         track = None
                         if det and det.get("relevance", 0) >= 1:
-                            track = render_track_image(det["cur"], det["forecast"],
-                                                       det.get("track"),
-                                                       title=f"台风“{det.get('cn', '')}”路径预报")
+                            track = fetch_official_track_bytes()
                         png = render_transition_card("upgrade", td, prev_level=rec.get("level"))
                         if png and wechat_image(png):
                             record_push("upgraded", a, msgtype="image",
@@ -2670,15 +2689,10 @@ def mode_daily():
         record_push("daily_card", msgtype="image",
                     extra={"active": len(active), "land": len(land),
                            "typhoon": len(typhoon_alerts)})
-        # 附台风路径图（仅对海南有影响时）
+        # 附台风路径图（仅对海南有影响时）——统一使用中央气象台官方概率预报图
         det_primary = pick_primary_typhoon()
         if det_primary and det_primary.get("relevance", 0) >= 1:
-            cur = det_primary["cur"]
-            km = haversine(cur["lat"], cur["lon"], CHENGMAI_LAT, CHENGMAI_LON)
-            title = (f"台风“{det_primary.get('cn', '')}”路径预报"
-                     f" ｜ 距澄迈约 {int(round(km))} 公里")
-            img = render_track_image(cur, det_primary["forecast"],
-                                     det_primary.get("track"), title=title)
+            img = fetch_official_track_bytes()
             if img:
                 wechat_image(img)
                 record_push("daily_image", msgtype="image",
@@ -2705,15 +2719,10 @@ def mode_daily():
         log("每日报告推送失败，不标记今日已完成，等待下一轮补发")
         return
 
-    # 附台风路径图：只在对海南有影响时才附图（relevance >= 1）。
+    # 附台风路径图：只在对海南有影响时才附图（relevance >= 1）——官方概率预报图
     det_primary = pick_primary_typhoon()
     if det_primary and det_primary.get("relevance", 0) >= 1:
-        cur = det_primary["cur"]
-        km = haversine(cur["lat"], cur["lon"], CHENGMAI_LAT, CHENGMAI_LON)
-        title = (f"台风“{det_primary.get('cn', '')}”路径预报"
-                 f" ｜ 距澄迈约 {int(round(km))} 公里")
-        img = render_track_image(cur, det_primary["forecast"],
-                                 det_primary.get("track"), title=title)
+        img = fetch_official_track_bytes()
         if img:
             wechat_image(img)
             record_push("daily_image", msgtype="image",
