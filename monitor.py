@@ -288,6 +288,8 @@ STRENGTH_CN = {
 }
 # 强度等级排序（用于判定加强/减弱趋势，参考日本气象厅 JMA 分级）
 STRENGTH_RANK = {"TD": 1, "TS": 2, "STS": 3, "TY": 4, "STY": 5, "SuperTY": 6}
+# 台风路径卡片推送节流（秒）：同一台风两次卡片推送最小间隔，避免每 10 分钟轮询刷屏
+TYPHOON_CARD_INTERVAL = 3 * 3600
 
 
 def log(*a):
@@ -799,6 +801,20 @@ def wechat_image(png_bytes):
         return True
     except Exception as e:
         log("路径图推送失败:", e)
+        return False
+
+
+def wechat_template_card(card):
+    """发送企业微信 template_card（text_notice / news_notice），返回是否成功。"""
+    if not WEBHOOK:
+        log("未配置 WECHAT_WEBHOOK，跳过卡片推送")
+        return False
+    try:
+        http_post_json(WEBHOOK, card, timeout=10)
+        log("template_card 推送成功")
+        return True
+    except Exception as e:
+        log("template_card 推送失败:", e)
         return False
 
 
@@ -1900,12 +1916,16 @@ def check_imminent(state):
                     msg += f"\n> （{note}）"
 
             ok = wechat_markdown(msg)
-            # 附台风路径图（方案 A 下用 image 消息呈现路径，最直观）
-            img = render_track_image(cur, det["forecast"], det.get("track"),
-                                     title=f"台风“{t['cn']}”路径预报")
-            img_ok = wechat_image(img) if img else False
+            # 附台风路径卡片（官方概率预报图，统一视觉；1h 内已发卡片则跳过，避免与周期卡重复）
+            sent_cards = state.setdefault("_typhoon_card_pushed", {})
+            card_sent = False
+            if now - sent_cards.get(key, 0.0) >= 3600:
+                img = fetch_official_image()
+                if wechat_template_card(build_typhoon_card(t, det, img)):
+                    sent_cards[key] = now
+                    card_sent = True
             record_push("imminent",
-                        msgtype=("markdown+image" if img_ok else "markdown"),
+                        msgtype=("markdown+news_card" if card_sent else "markdown"),
                         extra={"cn": t["cn"], "num": t["num"], "eta": eta["time"],
                                "eta_bjt": fmt_dt(eta["time"]),
                                "remain_hours": int(remain // 3600),
@@ -1928,6 +1948,142 @@ def check_imminent(state):
         alerted.pop(k, None)
         changed = True
     return changed
+
+
+# ---------- 台风路径 template_card（官方概率预报图，统一视觉） ----------
+def fetch_official_image():
+    """从中央气象台概率预报产品页直接取最新官方概率预报图 URL。
+
+    产品页（probability-img1.html）把当前活跃台风的最新概率预报图以静态
+    <img id="imgpath" src="..."> 形式写死在 HTML 里，地址在公开图床 image.nmc.cn
+    上，企业微信服务器可直接拉取——news_notice 卡片无需 playwright 截图、也无需
+    自建图床，零算力。取不到时返回 None（调用方降级为 text_notice 卡片）。
+    """
+    url = os.environ.get("TYPHOON_SHOT_URL",
+                         "https://www.nmc.cn/publish/typhoon/probability-img1.html")
+    try:
+        html = http_get(url, {"User-Agent": HEADERS["User-Agent"],
+                              "Referer": "https://www.nmc.cn/"}, timeout=20)
+    except Exception as e:
+        log("概率产品页请求失败：", e)
+        return None
+    m = re.search(r'id=imgpath[^>]*\bsrc="([^"]+\.JPG[^"]*)"', html)
+    if not m:
+        m = re.search(r'<img[^>]+id=imgpath[^>]+src="([^"]+)"', html)
+    if not m:
+        log("未在产品页找到官方图地址")
+        return None
+    img = m.group(1).split("?")[0]          # 去掉缓存时间戳，基础 URL 稳定
+    # 校验可达且确为图片
+    try:
+        req = urllib.request.Request(img, headers={"User-Agent": HEADERS["User-Agent"]},
+                                    method="HEAD")
+        with urllib.request.urlopen(req, timeout=15) as r:
+            ct = r.headers.get("Content-Type", "")
+            if r.status != 200 or not ct.startswith("image"):
+                log("官方图不可达或不是图片：", r.status, ct)
+                return None
+    except Exception as e:
+        log("官方图校验失败：", e)
+        return None
+    return img
+
+
+def build_typhoon_card(t, det, img_url):
+    """构造台风路径 template_card。有官方图 -> news_notice（大图）；否则 text_notice 兜底。"""
+    cur = det["cur"]
+    scn = STRENGTH_CN.get(cur.get("strength"), cur.get("strength") or "—")
+    if img_url:
+        return {
+            "msgtype": "template_card",
+            "template_card": {
+                "card_type": "news_notice",
+                "source": {"desc": "中央气象台 · 实时"},
+                "main_title": {
+                    "title": f"{t['cn']}({t['en']}) 第{t['num']}号 路径",
+                    "desc": f"{scn} · 影响海南",
+                },
+                "card_image": {"type": 0, "url": img_url},
+                "image_text": "中央气象台台风路径概率预报图",
+                "jump_list": [
+                    {"type": 1, "title": "中央气象台路径图", "url": TYPHOON_TRACK_URL},
+                    {"type": 1, "title": "Windy 实时风场", "url": "https://www.windy.com/?typhoon"},
+                ],
+                "card_action": {"type": 1, "url": TYPHOON_TRACK_URL},
+            },
+        }
+    # 官方图取不到时的文本兜底卡
+    horiz = [
+        {"keyname": "强度", "value": scn},
+        {"keyname": "中心气压", "value": f"{cur['pressure']} hPa" if cur.get("pressure") else "—"},
+        {"keyname": "最大风速", "value": f"{cur['wind']} m/s" if cur.get("wind") else "—"},
+        {"keyname": "中心位置", "value": f"{cur['lat']:.1f}°N {cur['lon']:.1f}°E"},
+        {"keyname": "移动",
+         "value": (f"{dir_cn(cur.get('move_dir'))} {cur.get('move_speed')} km/h"
+                   if cur.get("move_speed") else "暂不确定")},
+        {"keyname": "趋势", "value": det.get("trend", "强度平稳")},
+    ]
+    return {
+        "msgtype": "template_card",
+        "template_card": {
+            "card_type": "text_notice",
+            "source": {"desc": "中央气象台 · 实时"},
+            "main_title": {"title": "台风路径实时跟踪",
+                           "desc": f"{t['cn']}({t['en']}) 第{t['num']}号 · 影响海南"},
+            "sub_title_text": "官方概率预报图获取失败，点按钮看实时路径",
+            "horizontal_content_list": horiz,
+            "card_action": {"type": 1, "url": TYPHOON_TRACK_URL},
+        },
+    }
+
+
+def check_typhoon_card(state):
+    """台风路径卡片（周期性快照）：每 TYPHOON_CARD_INTERVAL 秒，给当前“影响海南”的台风
+    推送一张 news_notice 官方概率预报图卡片；与 check_imminent 共用 _typhoon_card_pushed
+    节流，避免两者在 3 小时内对同一台风重复发卡。无影响海南的台风则静默跳过。
+    """
+    now = time.time()
+    sent = state.setdefault("_typhoon_card_pushed", {})
+    try:
+        lst = fetch_typhoon_list()
+    except Exception as e:
+        log("typhoon card list error:", e)
+        return False
+    active = [x for x in lst if x.get("status") and x["status"] != "stop"]
+    did = False
+    for t in active:
+        try:
+            det = fetch_typhoon_track(t["id"])
+        except Exception as e:
+            log("typhoon card track error", t["id"], e)
+            continue
+        if not det:
+            continue
+        cur = det["cur"]
+        affects = (in_box(cur["lat"], cur["lon"])
+                   or any(in_box(f["lat"], f["lon"]) for f in det.get("forecast", [])))
+        if not affects:
+            continue
+        key = str(t["id"])
+        if now - sent.get(key, 0.0) < TYPHOON_CARD_INTERVAL:
+            continue   # 该台风近期已发过卡片（含 check_imminent 发的），节流
+        img = fetch_official_image()
+        card = build_typhoon_card(t, det, img)
+        ok = wechat_template_card(card)
+        sent[key] = now
+        record_push("typhoon_card",
+                    msgtype=("news_notice" if img else "text_notice"),
+                    extra={"cn": t["cn"], "num": t["num"], "ok": ok,
+                           "official_image": bool(img)})
+        did = True
+        log(f"[台风路径卡] 推送: {t['cn']} 第{t['num']}号 "
+            f"({'news_notice+官方图' if img else 'text_notice兜底'})")
+    # 清理已停编台风的节流记录，避免 state.json 无限增长
+    alive = {str(x["id"]) for x in active}
+    for k in [k for k in sent if k not in alive]:
+        sent.pop(k, None)
+        did = True
+    return did
 
 
 def mode_poll():
@@ -2142,6 +2298,16 @@ def mode_poll():
             changed = True
     except Exception as e:
         log("check_disturbance 异常:", repr(e))
+        changed = True
+
+    # 台风路径卡片（周期性快照，每3小时给影响海南的台风推一张官方图卡片）
+    try:
+        if check_typhoon_card(state):
+            changed = True
+    except Exception as e:
+        log("check_typhoon_card 异常:", repr(e))
+        state["_last_crash"] = {"at": datetime.now(BEIJING).strftime("%Y-%m-%d %H:%M:%S"),
+                                "where": "check_typhoon_card", "err": repr(e)}
         changed = True
 
     # 抓取异常自告警（容忍偶发失败，避免凌晨维护窗口/境外链路抖动误报）
