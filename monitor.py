@@ -1116,13 +1116,19 @@ def push_alerts(items, state=None):
             "area": ("沿海 🌊" if (a.get("type") in COASTAL_TYPES) else "老城 📍"),
         } for a in alerts]
         track = None
+        ty_link = None
         if any(a.get("type") == "台风" for a in alerts):
             det = pick_primary_typhoon()
             if det and det.get("relevance", 0) >= 1:
                 track = fetch_official_track_bytes()
+                ty_link = (f"https://typhoon.nmc.cn/view.html?id={det['id']}"
+                           if det.get("id") else TYPHOON_TRACK_URL)
         png = render_alert_card(card_alerts, track=track)
         if png and wechat_image(png):
             record_push("alert_card", msgtype="image", extra={"n": n})
+            if track and ty_link:
+                # 企业微信 image 消息不可点击，补一条可点的路径详情链接
+                wechat_markdown(f"▶ [台风路径详情（中央气象台台风网，可点击）]({ty_link})")
     except Exception as e:
         log("生效预警卡渲染失败（不影响文字推送）:", repr(e))
 
@@ -2189,6 +2195,9 @@ def mode_poll():
                                         extra={"from_level": rec.get("level"), "to_level": a["level"]})
                             if track:   # 台风升级另附路径图（与生效卡一致）
                                 wechat_image(track)
+                                ty_link = (f"https://typhoon.nmc.cn/view.html?id={det['id']}"
+                                           if det.get("id") else TYPHOON_TRACK_URL)
+                                wechat_markdown(f"▶ [台风路径详情（中央气象台台风网，可点击）]({ty_link})")
                                 record_push("upgraded_track", msgtype="image",
                                             extra={"cn": det.get("cn", "")})
                         else:
@@ -2400,6 +2409,7 @@ def pick_primary_typhoon():
         if score > best_score:
             best_score, best = score, det
             best["cn"] = t["cn"]
+            best["id"] = t["id"]          # 台风编号，用于拼接 typhoon.nmc.cn 详情页链接
             best["relevance"] = score   # 2=当前已在海南框内 / 1=预报路径进框 / 0=与海南无关
     return best
 
