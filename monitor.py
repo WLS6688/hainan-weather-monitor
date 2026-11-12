@@ -160,8 +160,6 @@ LEVEL_RANK = {"白色": 0, "蓝色": 1, "黄色": 2, "橙色": 3, "红色": 4}
 PUSH_DEDUP_SECONDS = 600
 # 台风强度/路径"显著变化"再次提醒的门槛
 IMMINENT_ETA_ADVANCE = 6 * 3600   # 预计进入时间提前 ≥6 小时 -> 补推一条升级提示
-# 台风路径图：是否生成并推送路径图（依赖 matplotlib，运行时按需自装；装不上则自动降级为纯文字）
-ENABLE_TRACK_IMAGE = True
 
 # ---------- 全员提醒（@all）强度分级与限流 ----------
 # 背景：企业微信只有 text 消息支持 @all；原实现里红/橙预警一律 @all，
@@ -1166,106 +1164,6 @@ def load_cjk_font():
     except Exception:
         pass
     return None
-
-
-def render_track_image(cur, forecast, track=None, title="台风路径预报"):
-    """生成台风路径图 PNG（bytes）。依赖 matplotlib，运行时按需自装；失败返回 None。
-
-    采用中央气象台实时路径数据绘制（实际数据，非过度渲染）；中文标注，
-    并配合消息内的可点击链接查看实时动态。"""
-    if not ENABLE_TRACK_IMAGE:
-        return None
-    try:
-        import matplotlib
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-    except Exception:
-        try:
-            subprocess.run([sys.executable, "-m", "pip", "install", "--quiet",
-                            "matplotlib"], check=False, timeout=240)
-            import matplotlib
-            matplotlib.use("Agg")
-            import matplotlib.pyplot as plt
-        except Exception as e:
-            log("matplotlib 不可用，跳过路径图:", e)
-            return None
-    try:
-        cn = False
-        try:
-            fname = load_cjk_font()
-            if fname:
-                plt.rcParams["font.sans-serif"] = [fname]
-                plt.rcParams["axes.unicode_minus"] = False
-                cn = True
-        except Exception:
-            pass
-
-        lat_min, lat_max, lon_min, lon_max = HAINAN_BOX
-        pad = 5
-        fig, ax = plt.subplots(figsize=(5.6, 5.6), dpi=130)
-        ax.set_facecolor("#eef5fb")
-        ax.set_xlim(lon_min - pad, lon_max + pad)
-        ax.set_ylim(lat_min - pad, lat_max + pad)
-        ax.set_xlabel("经度 (°E)" if cn else "Longitude (deg E)")
-        ax.set_ylabel("纬度 (°N)" if cn else "Latitude (deg N)")
-        ax.set_title(title if cn else "Typhoon Track & Forecast",
-                     fontsize=13, fontweight="bold")
-        ax.grid(True, linestyle=":", alpha=0.35)
-
-        # 海南岛轮廓（浅色，仅作定位参照）
-        hn_lon = [108.6, 109.2, 109.9, 110.6, 111.0, 110.5, 109.8, 108.9, 108.6]
-        hn_lat = [19.9, 20.1, 19.7, 19.3, 18.4, 18.2, 18.1, 18.4, 19.9]
-        ax.fill(hn_lon, hn_lat, color="#d7ead0", edgecolor="#5a8a3c",
-                linewidth=0.8, alpha=0.7)
-        # 主要城市标注
-        city_en = {"澄迈": "Chengmai", "海口": "Haikou", "三亚": "Sanya"}
-        for clon, clat, cname in [(CHENGMAI_LON, CHENGMAI_LAT, "澄迈"),
-                                   (110.20, 20.04, "海口"), (109.51, 18.25, "三亚")]:
-            ax.plot(clon, clat, "k*", markersize=7)
-            ax.text(clon + 0.15, clat - 0.35, cname if cn else city_en[cname], fontsize=8)
-
-        # 历史实况轨迹
-        if track:
-            tlon = [p["lon"] for p in track if "lon" in p]
-            tlat = [p["lat"] for p in track if "lat" in p]
-            if len(tlon) > 1:
-                ax.plot(tlon, tlat, "-", color="#185FA5", linewidth=1.8, alpha=0.85)
-                ax.scatter(tlon, tlat, color="#185FA5", s=12, zorder=3)
-        # 预报路径（含不确定性锥）
-        if forecast:
-            flon = [f["lon"] for f in forecast]
-            flat = [f["lat"] for f in forecast]
-            if len(flon) > 1:
-                ax.plot(flon, flat, "--", color="#E24B4A", linewidth=1.8)
-                for i in range(1, len(flon)):
-                    dx = flon[i] - flon[i - 1]
-                    dy = flat[i] - flat[i - 1]
-                    r = min(2.4, (dx * dx + dy * dy) ** 0.5 * 1.6 + 0.3)
-                    ax.add_patch(plt.Circle((flon[i], flat[i]), r,
-                                  color="#E24B4A", alpha=0.08))
-                ax.scatter(flon, flat, color="#E24B4A", s=20, marker="^", zorder=4)
-        # 当前位置
-        ax.plot(cur["lon"], cur["lat"], "o", color="#A32D2D", markersize=12,
-                markeredgecolor="white", zorder=5)
-        ax.text(cur["lon"] + 0.2, cur["lat"] + 0.2, "当前位置" if cn else "Now",
-                fontsize=9, color="#A32D2D")
-        # 图例
-        from matplotlib.lines import Line2D
-        ax.legend(handles=[
-            Line2D([0], [0], color="#185FA5", lw=1.8, label="历史路径" if cn else "Past track"),
-            Line2D([0], [0], color="#E24B4A", lw=1.8, linestyle="--",
-                   label="预报路径" if cn else "Forecast"),
-            Line2D([0], [0], marker="o", color="#A32D2D", lw=0,
-                   label="当前位置" if cn else "Current",
-                   markerfacecolor="#A32D2D", markersize=9),
-        ], loc="lower left", fontsize=8, framealpha=0.9)
-        buf = io.BytesIO()
-        fig.savefig(buf, format="png", bbox_inches="tight")
-        plt.close(fig)
-        return buf.getvalue()
-    except Exception as e:
-        log("路径图渲染失败:", e)
-        return None
 
 
 def alert_title(a):
