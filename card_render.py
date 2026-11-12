@@ -527,10 +527,10 @@ def _draw_defense(d, x, y, w, alerts, th):
 def render_alert_card(alerts, track=None, track_mode="compact"):
     """返回生效预警卡 PNG bytes。
     alerts: [{level,type,issuer,time,core,to,area}, ...]
-    track : 台风路径图，接受 PIL Image 或 PNG bytes（由 render_track_image 返回 bytes），可空。
+    track : 台风路径图，接受 PIL Image 或 PNG bytes（由 monitor.fetch_official_track_bytes 返回的中央气象台官方概率预报图），可空。
     """
     th = THEME
-    # render_track_image 返回 bytes，这里统一成 PIL Image
+    # track 为官方路径图 bytes（源自 monitor.fetch_official_track_bytes），这里统一成 PIL Image
     if track is not None and isinstance(track, (bytes, bytearray)):
         try:
             track = Image.open(io.BytesIO(track)).convert("RGB")
