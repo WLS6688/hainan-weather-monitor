@@ -111,3 +111,4 @@
 {"ts": "2026-11-12 08:01:38", "kind": "daily_card", "msgtype": "image", "active": 1, "land": 0, "typhoon": 0}
 {"ts": "2026-11-13 08:01:09", "kind": "daily_card", "msgtype": "image", "active": 1, "land": 0, "typhoon": 0}
 {"ts": "2026-11-14 08:00:51", "kind": "daily_card", "msgtype": "image", "active": 1, "land": 1, "typhoon": 0}
+{"ts": "2026-11-15 02:15:26", "kind": "error", "msgtype": "markdown", "fail_streak": 3, "errors": ["区县 澄迈(469023) 获取失败"], "ok": true}
