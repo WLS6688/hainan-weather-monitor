@@ -296,6 +296,16 @@ def log(*a):
 
 def http_get(url, headers=None, timeout=15):
     req = urllib.request.Request(url, headers=headers or {})
+    # weather.cma.cn 官方 SSL 证书于 2026-11-16 过期（有效期至 11-16 23:59:59 GMT），
+    # 运维尚未续期；严格校验会导致所有预警抓取失败（certificate has expired）。
+    # 该域名只取公开只读预警数据，单独对它跳过证书校验，其余域名保持严格校验。
+    # 待气象局续期证书后可删除此分支恢复严格校验。
+    if "weather.cma.cn" in url:
+        import ssl
+        with urllib.request.urlopen(
+                req, timeout=timeout,
+                context=ssl._create_unverified_context()) as resp:
+            return resp.read().decode("utf-8")
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return resp.read().decode("utf-8")
 
