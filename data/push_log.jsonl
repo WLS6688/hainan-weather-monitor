@@ -118,3 +118,4 @@
 {"ts": "2026-11-16 02:20:45", "kind": "recovered", "msgtype": "markdown", "ok": true}
 {"ts": "2026-11-16 08:00:57", "kind": "daily_card", "msgtype": "image", "active": 0, "land": 0, "typhoon": 0}
 {"ts": "2026-11-17 08:03:12", "kind": "daily_card", "msgtype": "image", "active": 0, "land": 0, "typhoon": 0}
+{"ts": "2026-11-17 08:22:03", "kind": "error", "msgtype": "markdown", "fail_streak": 3, "errors": ["区县 澄迈(469023) 获取失败", "省级(46) 获取失败"], "ok": true}
