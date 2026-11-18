@@ -121,3 +121,4 @@
 {"ts": "2026-11-17 08:22:03", "kind": "error", "msgtype": "markdown", "fail_streak": 3, "errors": ["区县 澄迈(469023) 获取失败", "省级(46) 获取失败"], "ok": true}
 {"ts": "2026-11-17 14:25:30", "kind": "error", "msgtype": "markdown", "fail_streak": 67, "errors": ["区县 澄迈(469023) 获取失败", "省级(46) 获取失败"], "ok": true}
 {"ts": "2026-11-17 15:06:37", "kind": "recovered", "msgtype": "markdown", "ok": true}
+{"ts": "2026-11-18 08:01:07", "kind": "daily_card", "msgtype": "image", "active": 1, "land": 0, "typhoon": 0}
